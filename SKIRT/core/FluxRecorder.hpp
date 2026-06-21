@@ -9,8 +9,10 @@
 #include "Array.hpp"
 #include "ThreadLocalMember.hpp"
 #include <tuple>
+class Direction;
 class MediumSystem;
 class PhotonPacket;
+class Position;
 class SimulationItem;
 class TimeGrid;
 class WavelengthGrid;
@@ -282,7 +284,59 @@ public:
         contribution before detection. */
     void detect(PhotonPacket* pp, int l, double distance = std::numeric_limits<double>::infinity());
 
-    /** This function processes and clears any information that may have been buffered by the
+    /** This function detects a batch of photon packets for total-only distant IFU/frame
+        configurations. It uses the pixel index vector supplied by the instrument and returns false
+        if the recorder configuration requires the generic detect() path. */
+    bool detectTotalBatch(const vector<PhotonPacket*>& ppv, const vector<int>& pixelv);
+
+    /** This function detects a batch of direct luminosity contributions for total-only distant
+        IFU/frame configurations. The wavelength and luminosity vectors correspond to the
+        peel-off photon packet before observer-frame redshift, detector transmission, and
+        extinction to the observer are applied. */
+    bool detectTotalBatch(const vector<int>& pixelv, const vector<double>& wavelengthv,
+                          const vector<double>& luminosityv, const vector<double>& tauv);
+
+    /** This function detects a batch of direct luminosity contributions for total-only distant
+        frame configurations. It projects positions and evaluates band transmissions on the GPU
+        when possible, returning false when the recorder or wavelength-grid configuration requires
+        the generic detect path. */
+	    bool detectTotalFrameBandBatch(
+	        const vector<Position>& positionv, const vector<double>& wavelengthv, const vector<double>& luminosityv,
+	        const vector<double>& tauv, double costheta, double sintheta, double cosphi, double sinphi,
+	        double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
+	        double ypmin, double ypsiz);
+
+	    /** This function returns true if the recorder is configured for the fused GPU
+	        Henyey-Greenstein scattering frame-band detector path. */
+	    bool supportsHenyeyGreensteinScatteringFrameBandBatch() const;
+
+	    /** This function returns true if the recorder is configured for the fused GPU
+	        observer-extinction frame-band detector path. */
+	    bool supportsObservedFrameBandBatch() const;
+
+	    /** This function detects a batch of direct luminosity contributions for total-only distant
+	        frame configurations by fusing observer extinction, detector projection, band
+	        transmission, and GPU accumulator updates. It returns false before accumulation when the
+	        recorder configuration requires the generic detect path. */
+	    bool detectObservedFrameBandBatch(
+	        const vector<Position>& positionv, const vector<double>& wavelengthv,
+	        const vector<double>& luminosityv, const Direction& bfkobs, double costheta,
+	        double sintheta, double cosphi, double sinphi, double cosomega, double sinomega,
+	        int numPixelsX, int numPixelsY, double xpmin, double xpsiz, double ypmin,
+	        double ypsiz);
+
+	    /** This function detects a batch of direct Henyey-Greenstein scattering peel-off
+	        contributions for total-only distant frame configurations by fusing observer extinction,
+	        detector projection, band transmission, and GPU accumulator updates. It returns false
+	        before accumulation when the recorder configuration requires the generic detect path. */
+	    bool detectHenyeyGreensteinScatteringFrameBandBatch(
+	        const vector<PhotonPacket*>& ppv, const vector<Position>& positionv,
+	        const vector<double>& wavelengthv, const Direction& bfkobs, double costheta,
+	        double sintheta, double cosphi, double sinphi, double cosomega, double sinomega,
+	        int numPixelsX, int numPixelsY, double xpmin, double xpsiz, double ypmin,
+	        double ypsiz);
+
+	    /** This function processes and clears any information that may have been buffered by the
         detect() function in thread-local storage. It is not thread-safe. After parallel threads
         have completed the work on a series of photon packets, and before the parallel threads are
         actually destructed, the flush() function should be called from a single thread. */

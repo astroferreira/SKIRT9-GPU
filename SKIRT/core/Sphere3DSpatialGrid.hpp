@@ -128,6 +128,20 @@ public:
         intersection point. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return the number of radial, polar, and azimuthal bins. */
+    int numRadialBins() const { return _Nr; }
+    int numPolarBins() const { return _Ntheta; }
+    int numAzimuthalBins() const { return _Nphi; }
+
+    /** These functions return the precomputed coordinate border data used for path traversal. */
+    const Array& radialBorderPositions() const { return _rv; }
+    const Array& polarBorderAngles() const { return _thetav; }
+    const Array& azimuthalBorderAngles() const { return _phiv; }
+    const Array& polarBorderCosines() const { return _cv; }
+    const Array& azimuthalBorderSines() const { return _sinv; }
+    const Array& azimuthalBorderCosines() const { return _cosv; }
+    double traversalEpsilon() const { return _eps; }
+
 protected:
     /** This function writes the intersection of the grid with the xy plane to the specified
         SpatialGridPlotFile object. */

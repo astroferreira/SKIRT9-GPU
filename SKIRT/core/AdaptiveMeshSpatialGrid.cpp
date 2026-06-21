@@ -97,6 +97,41 @@ std::unique_ptr<PathSegmentGenerator> AdaptiveMeshSpatialGrid::createPathSegment
 
 //////////////////////////////////////////////////////////////////////
 
+const vector<double>& AdaptiveMeshSpatialGrid::traversalNodeBounds() const
+{
+    return _mesh->traversalNodeBounds();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& AdaptiveMeshSpatialGrid::traversalChildBegin() const
+{
+    return _mesh->traversalChildBegin();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& AdaptiveMeshSpatialGrid::traversalChildCount() const
+{
+    return _mesh->traversalChildCount();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& AdaptiveMeshSpatialGrid::traversalChildIndex() const
+{
+    return _mesh->traversalChildIndex();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& AdaptiveMeshSpatialGrid::traversalCellIndex() const
+{
+    return _mesh->traversalCellIndex();
+}
+
+//////////////////////////////////////////////////////////////////////
+
 void AdaptiveMeshSpatialGrid::write_xy(SpatialGridPlotFile* outfile) const
 {
     // Output the domain

@@ -289,6 +289,19 @@ public:
         inaccuracies, the current point is advanced by a small distance, and the cell index is recalculated. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return flattened, read-only tetrahedral topology data for accelerated path
+        traversal. Vertex coordinates are stored as consecutive x, y, z triples. Tetra vertex
+        indices, face anchor vertex indices, and face neighbor indices are stored as four entries
+        per tetrahedron. Face normals are stored as four consecutive x, y, z triples per
+        tetrahedron, and centroids as one x, y, z triple per tetrahedron. */
+    const vector<double>& traversalVertexCoordinates() const { return _traversalVertexCoordinates; }
+    const vector<int>& traversalTetraVertexIndices() const { return _traversalTetraVertexIndices; }
+    const vector<int>& traversalFaceAnchorIndices() const { return _traversalFaceAnchorIndices; }
+    const vector<int>& traversalFaceNeighborIndices() const { return _traversalFaceNeighborIndices; }
+    const vector<double>& traversalFaceNormals() const { return _traversalFaceNormals; }
+    const vector<double>& traversalCentroids() const { return _traversalCentroids; }
+    double traversalEpsilon() const { return _eps; }
+
     //===================== Output =====================
 
 public:
@@ -308,6 +321,12 @@ private:
     int _numVertices{0};  // total number of vertices
     vector<Tetra> _tetrahedra;
     vector<Vec> _vertices;
+    vector<double> _traversalVertexCoordinates;
+    vector<int> _traversalTetraVertexIndices;
+    vector<int> _traversalFaceAnchorIndices;
+    vector<int> _traversalFaceNeighborIndices;
+    vector<double> _traversalFaceNormals;
+    vector<double> _traversalCentroids;
 
     // smart grid that organizes the tetrahedra into blocks
     BoxSearch _search;  // search structure for locating cells

@@ -5,6 +5,7 @@
 
 #include "MappingsSEDFamily.hpp"
 #include "Constants.hpp"
+#include "GpuAcceleration.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
@@ -68,6 +69,69 @@ double MappingsSEDFamily::cdf(Array& lambdav, Array& pv, Array& Pv, const Range&
     double fPDR = parameters[4];
 
     return SFR * _table.cdf(lambdav, pv, Pv, wavelengthRange, Z, logC, p, fPDR);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MappingsSEDFamily::cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                                 const vector<double>& flattenedParameters, size_t numEntities) const
+{
+    if (flattenedParameters.size() != 5 * numEntities) return false;
+
+    vector<double> parameterValues(4 * numEntities);
+    vector<double> scaleValues(numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        scaleValues[m] = flattenedParameters[5 * m] / Constants::Msun() * Constants::year();
+        parameterValues[4 * m] = flattenedParameters[5 * m + 1];
+        parameterValues[4 * m + 1] = flattenedParameters[5 * m + 2];
+        parameterValues[4 * m + 2] = flattenedParameters[5 * m + 3];
+        parameterValues[4 * m + 3] = flattenedParameters[5 * m + 4];
+    }
+
+    vector<const double*> axisData{_table.axisData<0>(), _table.axisData<1>(), _table.axisData<2>(),
+                                   _table.axisData<3>(), _table.axisData<4>()};
+    vector<size_t> axisSizes{_table.axisSize<0>(), _table.axisSize<1>(), _table.axisSize<2>(),
+                             _table.axisSize<3>(), _table.axisSize<4>()};
+    vector<bool> axisLog{_table.axisIsLog<0>(), _table.axisIsLog<1>(), _table.axisIsLog<2>(),
+                         _table.axisIsLog<3>(), _table.axisIsLog<4>()};
+    return GpuAcceleration::storedTableCdf(luminosities, 5, axisData, axisSizes, axisLog, _table.quantityDataRaw(),
+                                           _table.quantityStep(), _table.quantityIsLog(), _table.clampsFirstAxis(),
+                                           wavelengthRange.min(), wavelengthRange.max(), parameterValues, scaleValues,
+                                           numEntities);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MappingsSEDFamily::sampleWavelengthBatch(vector<double>& wavelengths, vector<double>& specificLuminosities,
+                                              const Range& wavelengthRange,
+                                              const vector<double>& flattenedParameters,
+                                              const vector<double>& intrinsicRandoms,
+                                              const vector<double>& forcedWavelengths, size_t numSamples) const
+{
+    if (flattenedParameters.size() != 5 * numSamples) return false;
+
+    vector<double> parameterValues(4 * numSamples);
+    for (size_t m = 0; m != numSamples; ++m)
+    {
+        parameterValues[4 * m] = flattenedParameters[5 * m + 1];
+        parameterValues[4 * m + 1] = flattenedParameters[5 * m + 2];
+        parameterValues[4 * m + 2] = flattenedParameters[5 * m + 3];
+        parameterValues[4 * m + 3] = flattenedParameters[5 * m + 4];
+    }
+
+    vector<const double*> axisData{_table.axisData<0>(), _table.axisData<1>(), _table.axisData<2>(),
+                                   _table.axisData<3>(), _table.axisData<4>()};
+    vector<size_t> axisSizes{_table.axisSize<0>(), _table.axisSize<1>(), _table.axisSize<2>(),
+                             _table.axisSize<3>(), _table.axisSize<4>()};
+    vector<bool> axisLog{_table.axisIsLog<0>(), _table.axisIsLog<1>(), _table.axisIsLog<2>(),
+                         _table.axisIsLog<3>(), _table.axisIsLog<4>()};
+    return GpuAcceleration::storedTableSampleWavelengths(wavelengths, specificLuminosities, 5, axisData, axisSizes,
+                                                         axisLog, _table.quantityDataRaw(), _table.quantityStep(),
+                                                         _table.quantityIsLog(), _table.clampsFirstAxis(),
+                                                         wavelengthRange.min(), wavelengthRange.max(),
+                                                         parameterValues, intrinsicRandoms, forcedWavelengths,
+                                                         numSamples);
 }
 
 ////////////////////////////////////////////////////////////////////

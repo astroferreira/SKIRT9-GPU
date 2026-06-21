@@ -101,6 +101,20 @@ public:
         class. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return flattened, read-only Voronoi topology data for accelerated path
+        traversal. Site coordinates are stored as consecutive x, y, z triples. Neighbor indices
+        are stored in a single flat list addressed by the begin/count vectors; negative neighbor
+        values represent domain walls using the CPU path generator convention. */
+    const vector<double>& traversalSiteCoordinates() const;
+    const vector<int>& traversalNeighborBegin() const;
+    const vector<int>& traversalNeighborCount() const;
+    const vector<int>& traversalNeighborIndex() const;
+    int traversalBlockGridN() const;
+    const vector<int>& traversalBlockBegin() const;
+    const vector<int>& traversalBlockCount() const;
+    const vector<int>& traversalBlockIndex() const;
+    double traversalEpsilon() const;
+
     /** This function outputs the grid plot files; it is provided here because the regular
         mechanism does not apply. The function reconstructs the Voronoi tesselation in order to
         produce the coordinates of the Voronoi cell vertices. */

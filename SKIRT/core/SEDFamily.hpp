@@ -51,6 +51,43 @@ public:
         factor, i.e. the value of Pv[n] before normalization. */
     virtual double cdf(Array& lambdav, Array& pv, Array& Pv, const Range& wavelengthRange,
                        const Array& parameters) const = 0;
+
+    /** This function optionally calculates the normalization factor returned by cdf() for a batch
+        of parameter vectors. The \em flattenedParameters vector contains \em numEntities
+        consecutive parameter vectors, each with the number and type of entries returned by
+        parameterInfo(). Implementations return true only if the batch calculation succeeded and
+        stored one luminosity per entity in \em luminosities; otherwise callers must fall back to
+        the scalar cdf() function. */
+    virtual bool cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                          const vector<double>& flattenedParameters, size_t numEntities) const
+    {
+        (void)luminosities;
+        (void)wavelengthRange;
+        (void)flattenedParameters;
+        (void)numEntities;
+        return false;
+    }
+
+    /** This function optionally samples wavelengths and evaluates the corresponding normalized
+        specific luminosities for a batch of parameter vectors. The \em flattenedParameters vector
+        contains \em numSamples consecutive parameter vectors. For each sample, if the optional
+        \em forcedWavelengths vector has a positive value, that wavelength is used; otherwise the
+        corresponding value in \em intrinsicRandoms is used to sample from the intrinsic SED CDF.
+        Implementations return true only if the batch calculation succeeded. */
+    virtual bool sampleWavelengthBatch(vector<double>& wavelengths, vector<double>& specificLuminosities,
+                                       const Range& wavelengthRange, const vector<double>& flattenedParameters,
+                                       const vector<double>& intrinsicRandoms,
+                                       const vector<double>& forcedWavelengths, size_t numSamples) const
+    {
+        (void)wavelengths;
+        (void)specificLuminosities;
+        (void)wavelengthRange;
+        (void)flattenedParameters;
+        (void)intrinsicRandoms;
+        (void)forcedWavelengths;
+        (void)numSamples;
+        return false;
+    }
 };
 
 ////////////////////////////////////////////////////////////////////

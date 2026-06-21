@@ -203,6 +203,10 @@ public:
     /** This function returns the number of scattering events the photon packet has experienced. */
     int numScatt() const { return _nscatt; }
 
+    /** This function returns true if emission peel-off may alter wavelength, luminosity, or
+        polarization beyond simply copying the packet and changing its direction. */
+    bool hasEmissionPeelOffAdjustments() const { return _bvi || _adi || _ppi; }
+
     // ------- Calculating Doppler shifts -------
 
 public:

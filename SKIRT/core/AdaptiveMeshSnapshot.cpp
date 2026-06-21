@@ -169,6 +169,36 @@ public:
        returned array is empty. */
     const Array& properties() { return _properties; }
 
+    int appendTraversalData(vector<double>& nodeBounds, vector<int>& childBegin, vector<int>& childCount,
+                            vector<int>& childIndex, vector<int>& cellIndex) const
+    {
+        int index = static_cast<int>(cellIndex.size());
+        nodeBounds.push_back(xmin());
+        nodeBounds.push_back(ymin());
+        nodeBounds.push_back(zmin());
+        nodeBounds.push_back(xmax());
+        nodeBounds.push_back(ymax());
+        nodeBounds.push_back(zmax());
+        childBegin.push_back(static_cast<int>(childIndex.size()));
+        cellIndex.push_back(_m);
+
+        if (isLeaf())
+        {
+            childCount.push_back(0);
+        }
+        else
+        {
+            int count = static_cast<int>(_nodes.size());
+            childCount.push_back(count);
+            int begin = static_cast<int>(childIndex.size());
+            childIndex.resize(begin + count, -1);
+            for (int l = 0; l != count; ++l)
+                childIndex[begin + l] =
+                    _nodes[l]->appendTraversalData(nodeBounds, childBegin, childCount, childIndex, cellIndex);
+        }
+        return index;
+    }
+
 private:
     int _Nx, _Ny, _Nz;           // number of grid cells in each direction; zero for leaf nodes
     int _m;                      // Morton order index for the cell represented by this leaf node; -1 for nonleaf nodes
@@ -194,6 +224,13 @@ void AdaptiveMeshSnapshot::readAndClose()
     // construct the root node, and recursively all other nodes;
     // this also fills the _cells vector
     _root = new Node(_extent, infile(), _cells);
+    _traversalNodeBounds.clear();
+    _traversalChildBegin.clear();
+    _traversalChildCount.clear();
+    _traversalChildIndex.clear();
+    _traversalCellIndex.clear();
+    _root->appendTraversalData(_traversalNodeBounds, _traversalChildBegin, _traversalChildCount, _traversalChildIndex,
+                               _traversalCellIndex);
 
     // verify that all data was read and close the file
     Array dummy;

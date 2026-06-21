@@ -124,6 +124,16 @@ public:
         neighbor lists constructed for each tree node during setup. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return flattened, read-only node hierarchy data for accelerated path
+        traversal. Node bounds are stored as consecutive xmin, ymin, zmin, xmax, ymax, zmax values;
+        child indices are stored in a single flat list addressed by the begin/count vectors; and
+        node cell indices are -1 for nonleaf nodes. */
+    const vector<double>& traversalNodeBounds() const { return _traversalNodeBounds; }
+    const vector<int>& traversalChildBegin() const { return _traversalChildBegin; }
+    const vector<int>& traversalChildCount() const { return _traversalChildCount; }
+    const vector<int>& traversalChildIndex() const { return _traversalChildIndex; }
+    const vector<int>& traversalCellIndex() const { return _traversalCellIndex; }
+
     /** This function writes the topology of the tree to the specified text file in a simple,
         proprietary format. After a brief descriptive header, it writes lines that each contain
         just a single integer number. The first line specifies the number of children for each
@@ -174,6 +184,11 @@ private:
                                // node id in each node corresponds to index in this vector
     vector<int> _cellindexv;   // cell index m corresponding to each node in nodev; -1 for nonleaf nodes
     vector<int> _idv;          // node id (or equivalently, index in nodev) for each cell (i.e. leaf node)
+    vector<double> _traversalNodeBounds;
+    vector<int> _traversalChildBegin;
+    vector<int> _traversalChildCount;
+    vector<int> _traversalChildIndex;
+    vector<int> _traversalCellIndex;
 
     // allow our path segment generator to access our private data members
     class MySegmentGenerator;

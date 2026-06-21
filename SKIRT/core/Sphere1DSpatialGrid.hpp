@@ -94,6 +94,12 @@ public:
         way as a proxy for updating \f${\bf{r}}\f$. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** This function returns the number of radial bins. */
+    int numRadialBins() const { return _Nr; }
+
+    /** This function returns the radial cell border coordinates. */
+    const Array& radialBorderPositions() const { return _rv; }
+
 protected:
     /** This function writes the intersection of the grid with the xy plane to the specified
         SpatialGridPlotFile object. */

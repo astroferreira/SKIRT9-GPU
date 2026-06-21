@@ -113,3 +113,30 @@ void SourceSystem::launch(PhotonPacket* pp, size_t historyIndex) const
 }
 
 //////////////////////////////////////////////////////////////////////
+
+void SourceSystem::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets) const
+{
+    if (!numPackets) return;
+
+    size_t endHistoryIndex = firstHistoryIndex + numPackets;
+    size_t offset = 0;
+    while (offset != numPackets)
+    {
+        size_t historyIndex = firstHistoryIndex + offset;
+        auto h = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+        size_t sourceEnd = min(endHistoryIndex, _Iv[h + 1]);
+        size_t count = sourceEnd - historyIndex;
+        double weight = _Lv[h] / _Wv[h];
+
+        _sources[h]->launchBatch(ppv + offset, historyIndex, count, _Lpp * weight);
+        for (size_t i = 0; i != count; ++i)
+        {
+            PhotonPacket* pp = ppv + offset + i;
+            pp->setPrimaryOrigin(h);
+            for (auto callback : _callbackv) callback->probePhotonPacket(pp);
+        }
+        offset += count;
+    }
+}
+
+//////////////////////////////////////////////////////////////////////

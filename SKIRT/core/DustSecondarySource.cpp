@@ -7,6 +7,7 @@
 #include "AngularDistributionInterface.hpp"
 #include "Configuration.hpp"
 #include "DisjointWavelengthGrid.hpp"
+#include "GpuAcceleration.hpp"
 #include "Log.hpp"
 #include "MediumSystem.hpp"
 #include "NR.hpp"
@@ -37,13 +38,22 @@ double DustSecondarySource::prepareLuminosities()
     // calculate the absorbed (and thus to be emitted) dust luminosity for each spatial cell
     // this can be somewhat time-consuming, so we do this in parallel
     _Lv.resize(numCells);
-    find<ParallelFactory>()->parallelDistributed()->call(numCells, [this](size_t firstIndex, size_t numIndices) {
-        for (size_t m = firstIndex; m != firstIndex + numIndices; ++m)
-        {
-            _Lv[m] = _ms->dustLuminosity(m);
-        }
-    });
-    ProcessManager::sumToAll(_Lv);
+    Array Labs1v;
+    Array Labs2v;
+    if (_ms->dustAbsorbedLuminosities(Labs1v, Labs2v))
+    {
+        _Lv = Labs1v + Labs2v;
+    }
+    else
+    {
+        find<ParallelFactory>()->parallelDistributed()->call(numCells, [this](size_t firstIndex, size_t numIndices) {
+            for (size_t m = firstIndex; m != firstIndex + numIndices; ++m)
+            {
+                _Lv[m] = _ms->dustLuminosity(m);
+            }
+        });
+        ProcessManager::sumToAll(_Lv);
+    }
 
     // --------- library mapping ---------
 
@@ -65,7 +75,7 @@ double DustSecondarySource::prepareLuminosities()
 
     // calculate  the total luminosity, and normalize the individual luminosities to unity
     double L = _Lv.sum();
-    _Lv /= L;
+    if (!GpuAcceleration::divideValues(&_Lv[0], numCells, L)) _Lv /= L;
 
     // --------- logging ---------
 
@@ -121,14 +131,17 @@ void DustSecondarySource::preparePacketMap(size_t firstIndex, size_t numIndices)
 
     // --------- weights ---------
 
-    // determine a uniform weight for each cell with non-negligable emission, and normalize to unity
-    Array wv(numCells);
-    for (int m = 0; m != numCells; ++m) wv[m] = _Lv[m] > 0 ? 1. : 0.;
-    wv /= wv.sum();
-
     // calculate the final, composite-biased launch weight for each cell, normalized to unity
     double xi = _config->secondarySpatialBias();
-    _Wv = (1 - xi) * _Lv + xi * wv;
+    _Wv.resize(numCells);
+    if (!GpuAcceleration::compositeLaunchWeights(&_Lv[0], numCells, xi, &_Wv[0]))
+    {
+        // determine a uniform weight for each cell with non-negligable emission, and normalize to unity
+        Array wv(numCells);
+        for (int m = 0; m != numCells; ++m) wv[m] = _Lv[m] > 0 ? 1. : 0.;
+        wv /= wv.sum();
+        _Wv = (1 - xi) * _Lv + xi * wv;
+    }
 
     // determine the first history index for each cell, using the adjusted cell ordering so that
     // all photon packets for a given library entry are launched consecutively
@@ -514,6 +527,36 @@ void DustSecondarySource::launch(PhotonPacket* pp, size_t historyIndex, double L
     auto p = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
     auto m = _mv[p];
 
+    launchFromCell(pp, historyIndex, L, static_cast<int>(p), m);
+}
+
+////////////////////////////////////////////////////////////////////
+
+void DustSecondarySource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const
+{
+    if (!numPackets) return;
+
+    size_t endHistoryIndex = firstHistoryIndex + numPackets;
+    size_t offset = 0;
+    while (offset != numPackets)
+    {
+        size_t historyIndex = firstHistoryIndex + offset;
+        auto p = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+        size_t cellEnd = min(endHistoryIndex, _Iv[p + 1]);
+        size_t count = cellEnd - historyIndex;
+        int cellOrderIndex = static_cast<int>(p);
+        int m = _mv[p];
+
+        for (size_t i = 0; i != count; ++i)
+            launchFromCell(&ppv[offset + i], historyIndex + i, L, cellOrderIndex, m);
+        offset += count;
+    }
+}
+
+////////////////////////////////////////////////////////////////////
+
+void DustSecondarySource::launchFromCell(PhotonPacket* pp, size_t historyIndex, double L, int p, int m) const
+{
     // calculate the weight related to biased source selection
     double ws = _Lv[m] / _Wv[m];
 

@@ -7,6 +7,7 @@
 #define FRAMEINSTRUMENT_HPP
 
 #include "DistantInstrument.hpp"
+#include "Position.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
@@ -66,6 +67,38 @@ public:
         instrument. */
     void detect(PhotonPacket* pp) override;
 
+    /** This function detects a batch of photon packets for total-only frame outputs. It returns
+        false if the associated flux recorder requires the generic scalar detect() path. */
+    bool detectTotalBatch(const vector<PhotonPacket*>& ppv);
+
+    /** This function detects a batch of direct luminosity contributions for total-only frame
+        outputs. It returns false if the associated flux recorder requires the generic scalar
+        detect() path. */
+    bool detectTotalBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                          const vector<double>& luminosityv, const vector<double>& tauv);
+
+    /** This function returns true if this frame instrument can use the fused GPU
+        Henyey-Greenstein scattering detector path. */
+    bool supportsHenyeyGreensteinScatteringFrameBandBatch();
+
+    /** This function returns true if this frame instrument can use the fused GPU
+        observer-extinction detector path. */
+    bool supportsObservedFrameBandBatch();
+
+    /** This function detects a batch of direct luminosity contributions for total-only frame
+        outputs using a fused GPU observer/detector path. It returns false if the associated flux
+        recorder requires the generic scalar detect path. */
+    bool detectObservedFrameBandBatch(const vector<Position>& positionv,
+                                      const vector<double>& wavelengthv,
+                                      const vector<double>& luminosityv);
+
+    /** This function detects a batch of direct Henyey-Greenstein scattering peel-off
+        contributions for total-only frame outputs using a fused GPU observer/detector path. It
+        returns false if the associated flux recorder requires the generic scalar detect path. */
+    bool detectHenyeyGreensteinScatteringFrameBandBatch(const vector<PhotonPacket*>& ppv,
+                                                        const vector<Position>& positionv,
+                                                        const vector<double>& wavelengthv);
+
 private:
     /** This private helper function returns the index of the spatial pixel on the detector that
         will be hit by a photon packet, or -1 if the photon packet does not hit the detector. Given
@@ -94,6 +127,10 @@ private:
         than \f$y\f$. The spatial pixel number \f$l\f$ is then determined as \f$l=i+j\,N_x\f$,
         asuming \f$i\f$ and \f$j\f$ are indeed within the detector range. */
     int pixelOnDetector(const PhotonPacket* pp) const;
+
+    /** This private helper function returns the index of the spatial pixel on the detector for a
+        raw model position, or -1 if the position does not hit the detector. */
+    int pixelOnDetector(const Position& bfr) const;
 
     //======================== Data Members ========================
 

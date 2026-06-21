@@ -115,6 +115,15 @@ public:
         intersection point. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return the number of radial and polar bins. */
+    int numRadialBins() const { return _Nr; }
+    int numPolarBins() const { return _Ntheta; }
+
+    /** These functions return the radial borders, polar-angle borders, and polar-border cosines. */
+    const Array& radialBorderPositions() const { return _rv; }
+    const Array& polarBorderAngles() const { return _thetav; }
+    const Array& polarBorderCosines() const { return _cv; }
+
 protected:
     /** This function writes the intersection of the grid with the xy plane to the specified
         SpatialGridPlotFile object. */

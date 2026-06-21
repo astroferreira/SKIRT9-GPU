@@ -98,6 +98,18 @@ public:
     double cdf(Array& lambdav, Array& pv, Array& Pv, const Range& wavelengthRange,
                const Array& parameters) const override;
 
+    /** This function calculates the cdf() normalization factors for a batch of SSP parameter
+        vectors, using the GPU backend if available. */
+    bool cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                  const vector<double>& flattenedParameters, size_t numEntities) const override;
+
+    /** This function samples wavelengths and normalized specific luminosities for a batch of SSP
+        parameter vectors, using the GPU backend if available. */
+    bool sampleWavelengthBatch(vector<double>& wavelengths, vector<double>& specificLuminosities,
+                               const Range& wavelengthRange, const vector<double>& flattenedParameters,
+                               const vector<double>& intrinsicRandoms, const vector<double>& forcedWavelengths,
+                               size_t numSamples) const override;
+
     //====================== Data members =====================
 
 private:

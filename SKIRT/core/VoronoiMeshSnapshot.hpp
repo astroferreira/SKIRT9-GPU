@@ -334,6 +334,20 @@ public:
         cellIndex() function causes undefined behavior. */
     int cellIndex(Position bfr) const;
 
+    /** These functions return flattened, read-only Voronoi topology data for accelerated path
+        traversal. Site coordinates are stored as consecutive x, y, z triples. Neighbor indices
+        are stored in a single flat list addressed by the begin/count vectors; negative neighbor
+        values represent domain walls using the CPU path generator convention. */
+    const vector<double>& traversalSiteCoordinates() const { return _traversalSiteCoordinates; }
+    const vector<int>& traversalNeighborBegin() const { return _traversalNeighborBegin; }
+    const vector<int>& traversalNeighborCount() const { return _traversalNeighborCount; }
+    const vector<int>& traversalNeighborIndex() const { return _traversalNeighborIndex; }
+    int traversalBlockGridN() const { return _traversalBlockGridN; }
+    const vector<int>& traversalBlockBegin() const { return _traversalBlockBegin; }
+    const vector<int>& traversalBlockCount() const { return _traversalBlockCount; }
+    const vector<int>& traversalBlockIndex() const { return _traversalBlockIndex; }
+    double traversalEpsilon() const { return _eps; }
+
 protected:
     /** This function returns a reference to an array containing the imported properties (in column
         order) for the cell with index \f$0\le m \le N_\mathrm{ent}-1\f$. If the index is out of
@@ -446,6 +460,14 @@ private:
 
     // data members initialized when processing snapshot input and further completed by BuildMesh()
     vector<Cell*> _cells;  // cell objects, indexed on m
+    vector<double> _traversalSiteCoordinates;
+    vector<int> _traversalNeighborBegin;
+    vector<int> _traversalNeighborCount;
+    vector<int> _traversalNeighborIndex;
+    int _traversalBlockGridN{0};
+    vector<int> _traversalBlockBegin;
+    vector<int> _traversalBlockCount;
+    vector<int> _traversalBlockIndex;
 
     // data members initialized when processing snapshot input, but only if a density policy has been set
     Array _rhov;       // density for each cell (not normalized)

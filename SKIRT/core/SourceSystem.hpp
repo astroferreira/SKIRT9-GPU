@@ -133,6 +133,9 @@ public:
         (re-)initialized so that it is ready to start its lifecycle. */
     void launch(PhotonPacket* pp, size_t historyIndex) const;
 
+    /** This function launches a contiguous range of photon packets from the mapped sources. */
+    void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets) const;
+
     //======================== Data Members ========================
 
 private:

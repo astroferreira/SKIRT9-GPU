@@ -17,16 +17,12 @@ namespace
 ////////////////////////////////////////////////////////////////////
 
 SpatialGridPath::SpatialGridPath(const Position& bfr, const Direction& bfk) : _bfr(bfr), _bfk(bfk)
-{
-    _segments.reserve(INITIAL_CAPACITY);
-}
+{}
 
 ////////////////////////////////////////////////////////////////////
 
 SpatialGridPath::SpatialGridPath()
-{
-    _segments.reserve(INITIAL_CAPACITY);
-}
+{}
 
 ////////////////////////////////////////////////////////////////////
 
@@ -42,6 +38,7 @@ void SpatialGridPath::addSegment(int m, double ds)
 {
     if (ds > 0.)
     {
+        if (_segments.capacity() == 0) _segments.reserve(INITIAL_CAPACITY);
         _s += ds;
         _segments.emplace_back(m, ds, _s);
     }

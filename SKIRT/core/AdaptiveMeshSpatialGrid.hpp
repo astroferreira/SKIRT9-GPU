@@ -67,6 +67,16 @@ public:
         class. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return flattened, read-only node hierarchy data for accelerated path
+        traversal. Node bounds are stored as consecutive xmin, ymin, zmin, xmax, ymax, zmax values;
+        child indices are stored in a single flat list addressed by the begin/count vectors; and
+        node cell indices are -1 for nonleaf nodes. */
+    const vector<double>& traversalNodeBounds() const;
+    const vector<int>& traversalChildBegin() const;
+    const vector<int>& traversalChildCount() const;
+    const vector<int>& traversalChildIndex() const;
+    const vector<int>& traversalCellIndex() const;
+
 protected:
     /** This function writes the intersection of the grid structure with the xy plane to the
         specified SpatialGridPlotFile object. */

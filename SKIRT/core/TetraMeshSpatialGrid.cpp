@@ -471,6 +471,25 @@ void TetraMeshSpatialGrid::storeTetrahedra(const tetgenio& final, bool storeVert
         }
     }
 
+    _traversalVertexCoordinates.clear();
+    _traversalVertexCoordinates.reserve(3 * static_cast<size_t>(_vertices.size()));
+    for (const Vec& vertex : _vertices)
+    {
+        _traversalVertexCoordinates.push_back(vertex.x());
+        _traversalVertexCoordinates.push_back(vertex.y());
+        _traversalVertexCoordinates.push_back(vertex.z());
+    }
+    _traversalTetraVertexIndices.clear();
+    _traversalFaceAnchorIndices.clear();
+    _traversalFaceNeighborIndices.clear();
+    _traversalFaceNormals.clear();
+    _traversalCentroids.clear();
+    _traversalTetraVertexIndices.reserve(4 * static_cast<size_t>(_numCells));
+    _traversalFaceAnchorIndices.reserve(4 * static_cast<size_t>(_numCells));
+    _traversalFaceNeighborIndices.reserve(4 * static_cast<size_t>(_numCells));
+    _traversalFaceNormals.reserve(12 * static_cast<size_t>(_numCells));
+    _traversalCentroids.reserve(3 * static_cast<size_t>(_numCells));
+
     _tetrahedra.reserve(_numCells);  // no default constructor for Tetra
     for (int i = 0; i < _numCells; i++)
     {
@@ -480,6 +499,7 @@ void TetraMeshSpatialGrid::storeTetrahedra(const tetgenio& final, bool storeVert
         {
             vertexIndices[c] = final.tetrahedronlist[4 * i + c];
         }
+        for (int vertexIndex : vertexIndices) _traversalTetraVertexIndices.push_back(vertexIndex);
 
         // faces
         FourFaces faces;
@@ -511,9 +531,18 @@ void TetraMeshSpatialGrid::storeTetrahedra(const tetgenio& final, bool storeVert
             normal /= normal.norm();
 
             faces[f] = Face(ntetra, nface, normal);
+            _traversalFaceAnchorIndices.push_back(vertexIndices[cv[0]]);
+            _traversalFaceNeighborIndices.push_back(ntetra);
+            _traversalFaceNormals.push_back(normal.x());
+            _traversalFaceNormals.push_back(normal.y());
+            _traversalFaceNormals.push_back(normal.z());
         }
 
         _tetrahedra.emplace_back(_vertices, vertexIndices, faces);
+        const Vec& centroid = _tetrahedra.back().centroid();
+        _traversalCentroids.push_back(centroid.x());
+        _traversalCentroids.push_back(centroid.y());
+        _traversalCentroids.push_back(centroid.z());
     }
 
     // compile statistics

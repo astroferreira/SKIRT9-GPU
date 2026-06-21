@@ -115,6 +115,14 @@ public:
         way as a proxy for updating the 3D position \f${\bf{r}}\f$. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return the number of radial and vertical bins. */
+    int numRadialBins() const { return _NR; }
+    int numZBins() const { return _Nz; }
+
+    /** These functions return the radial and vertical cell border coordinates. */
+    const Array& radialBorderPositions() const { return _Rv; }
+    const Array& zBorderPositions() const { return _zv; }
+
 protected:
     /** This function writes the intersection of the grid with the xy plane to the specified
         SpatialGridPlotFile object. */

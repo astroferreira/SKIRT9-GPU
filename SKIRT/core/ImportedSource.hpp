@@ -224,12 +224,23 @@ public:
          described above and an isotropic launch direction. */
     void launch(PhotonPacket* pp, size_t historyIndex, double L) const override;
 
+    /** This function launches a contiguous history-index range from this imported source. */
+    void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const override;
+
     /** This function returns (a pointer to) the snapshot object associated with this imported
         source. It is intended to provide InputModelProbe instances with direct access to the
         snapshot for probing imported information that is not otherwise made available to the
         simulation. To preserve proper data encapsulation, this function should \em not be called
         from anywhere else in the simulation machinery. */
     const Snapshot* snapshot() const;
+
+private:
+    /** This function precomputes launch wavelengths and spectral bias weights for the specified
+        history-index range using an optional SED-family batch implementation. */
+    bool prepareGpuLaunchSpectra(size_t firstIndex, size_t numIndices);
+
+    /** This function launches a photon packet from the specified mapped entity. */
+    void launchFromEntity(PhotonPacket* pp, size_t historyIndex, double L, int m) const;
 
     //======================== Data Members ========================
 
@@ -251,6 +262,12 @@ private:
     Array _bv;           // the bias for each entity (normalized to unity)
     Array _Lbv;          // the bias multiplied by luminosity for each entity (normalized to unity)
     vector<size_t> _Iv;  // first history index allocated to each entity (with extra entry at the end)
+
+    // initialized by prepareForLaunch() when GPU batch SED sampling is available
+    bool _hasLaunchSpectra{false};
+    size_t _launchSpectraFirstIndex{0};
+    vector<double> _launchWavelengthv;
+    vector<double> _launchSpectralWeightv;
 };
 
 //////////////////////////////////////////////////////////////////////

@@ -10,6 +10,7 @@
 #include "FatalError.hpp"
 #include "FileLog.hpp"
 #include "FilePaths.hpp"
+#include "GpuAcceleration.hpp"
 #include "MonteCarloSimulation.hpp"
 #include "Parallel.hpp"
 #include "ParallelFactory.hpp"
@@ -28,7 +29,7 @@
 namespace
 {
     // the allowed options list, in the format consumed by the CommandLineArguments constructor
-    static const char* allowedOptions = "-t* -s* -d -b -v -m -e -k -i* -o* -r -x";
+    static const char* allowedOptions = "-t* -s* -d -g -G -b -v -m -e -k -i* -o* -r -x";
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -56,6 +57,7 @@ int SkirtCommandLineHandler::perform()
         // otherwise --> error
         if (_args.isValid() && !_args.hasOptions() && !_args.hasFilepaths()) return doInteractive();
         if (_args.hasFilepaths()) return doBatch();
+        if (_args.isPresent("-G")) return doGpuDiagnostics();
         if (_args.isPresent("-x")) return doSmileSchema();
         _console.error("Invalid command line arguments", false);
         printHelp();
@@ -233,6 +235,24 @@ int SkirtCommandLineHandler::doSmileSchema()
 
 ////////////////////////////////////////////////////////////////////
 
+int SkirtCommandLineHandler::doGpuDiagnostics()
+{
+    GpuAcceleration::setProcessEnabled(true);
+    _console.info("GPU acceleration is " + GpuAcceleration::status());
+
+    string message;
+    if (GpuAcceleration::selfTest(message))
+    {
+        _console.info(message);
+        return EXIT_SUCCESS;
+    }
+
+    _console.error(message, false);
+    return EXIT_FAILURE;
+}
+
+////////////////////////////////////////////////////////////////////
+
 void SkirtCommandLineHandler::addSkiFilesFor(string filepath)
 {
     string name = StringUtils::filename(filepath);
@@ -353,10 +373,14 @@ void SkirtCommandLineHandler::doSimulation(size_t index)
             simulation->config()->setEmulationMode();
         }
 
+        // activate optional GPU acceleration if requested
+        if (_args.isPresent("-g")) GpuAcceleration::setProcessEnabled(true);
+
         // issue welcome message to the simulation log file
         log->setup();
         log->info(_producerInfo);
         log->info(_hostUserInfo);
+        log->info("GPU acceleration is " + GpuAcceleration::status());
 
         // log a warning about problems with the installed resource packs
         reportResourceIssues(simulation->log());
@@ -433,13 +457,15 @@ void SkirtCommandLineHandler::printHelp()
     _console.warning("To run a simulation with default options:  skirt <ski-filename>");
     _console.warning("");
     _console.warning("  skirt [-t <threads>] [-s <simulations>] [-d]");
-    _console.warning("        [-b] [-v] [-m] [-e]");
+    _console.warning("        [-g] [-b] [-v] [-m] [-e]");
     _console.warning("        [-k] [-i <dirpath>] [-o <dirpath>]");
     _console.warning("        [-r] {<filepath>}*");
     _console.warning("");
     _console.warning("  -t <threads> : the number of parallel threads for each simulation");
     _console.warning("  -s <simulations> : the number of parallel simulations per process");
     _console.warning("  -d : enable data parallelization mode for multiple processes");
+    _console.warning("  -g : enable runtime GPU acceleration for supported photon-cycle kernels");
+    _console.warning("  -G : test the runtime GPU backend and exit");
     _console.warning("  -b : force brief console logging");
     _console.warning("  -v : force verbose logging for multiple processes");
     _console.warning("  -m : state the amount of used memory at the start of each log message");

@@ -507,6 +507,23 @@ public:
         \f$\theta\f$, discretized on the grid returned by the thetaGrid() function. */
     const Array& sectionsAbspol(double lambda) const override;
 
+    /** This function returns the shifted wavelength lookup grid used by the scalar section
+        functions. It is intended for GPU table evaluation and must be indexed with the same
+        locateClip semantics as indexForLambda(). */
+    const Array& sectionLookupWavelengths() const { return _lambdav; }
+
+    /** This function returns the cached absorption cross sections on sectionLookupWavelengths(). */
+    const Array& sectionAbsValues() const { return _sigmaabsv; }
+
+    /** This function returns the cached scattering cross sections on sectionLookupWavelengths(). */
+    const Array& sectionScaValues() const { return _sigmascav; }
+
+    /** This function returns the cached extinction cross sections on sectionLookupWavelengths(). */
+    const Array& sectionExtValues() const { return _sigmaextv; }
+
+    /** This function returns the cached asymmetry parameter values on sectionLookupWavelengths(). */
+    const Array& sectionAsymmValues() const { return _asymmparv; }
+
     //======================== Data Members ========================
 
 private:

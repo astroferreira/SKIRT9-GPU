@@ -72,9 +72,15 @@ public:
         Finally, the function actually initializes the photon packet with this information. */
     void launch(PhotonPacket* pp, size_t historyIndex, double L) const override;
 
+    /** This function launches a contiguous range of dust-emission photon packets, walking cell
+        ranges once instead of locating the launch cell separately for every packet. */
+    void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const override;
+
     //======================== Data Members ========================
 
 private:
+    void launchFromCell(PhotonPacket* pp, size_t historyIndex, double L, int p, int m) const;
+
     // initialized by prepareLuminosities() and preparePacketMap()
     Configuration* _config{nullptr};
     MediumSystem* _ms{nullptr};

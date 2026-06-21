@@ -24,6 +24,7 @@
 class Configuration;
 class MaterialState;
 class PhotonPacket;
+class Position;
 class Random;
 class ShortArray;
 class SpatialGridPath;
@@ -375,7 +376,108 @@ public:
         of the specified photon packet such as the polarization state. */
     double albedoForScattering(const PhotonPacket* pp) const;
 
-    /** This function calculates the relative weights of the medium components in a scattering
+    /** This function attempts to calculate scattering albedos for a batch of photon packets whose
+        scattering interaction points have already been determined. It returns false if no
+        GPU-backed batch path is available so callers can fall back to albedoForScattering(). */
+    bool albedosForScattering(const vector<PhotonPacket*>& ppv, vector<double>& albedov) const;
+
+    /** This function attempts to calculate forced-scattering interaction points and luminosity
+        bias factors for a batch of photon packets whose cumulative optical-depth paths have
+        already been prepared. It returns false if no GPU-backed path is available so callers can
+        fall back to the scalar forced-propagation implementation. */
+    bool forcedPropagationResults(const vector<PhotonPacket*>& ppv, const vector<double>& tauinteractv,
+                                  const vector<double>& pathBiasWeightv, vector<int>& cellv,
+                                  vector<double>& distancev, vector<double>& tauAbsv,
+                                  vector<double>& weightv) const;
+
+    /** This function attempts to calculate reduced radiation-field contributions and
+        forced-scattering interaction results for a batch of photon packets in one GPU runtime
+        pass over the same prepared paths. It returns false if the combined GPU-backed path is not
+        available. */
+    bool radiationFieldAndForcedPropagationResults(
+        const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+        const vector<int>& wavelengthBinv, int numWavelengths,
+        const vector<double>& tauinteractv, const vector<double>& pathBiasWeightv,
+        vector<int>& binIndexv, vector<double>& Ldsv, vector<int>& cellv,
+        vector<double>& distancev, vector<double>& tauAbsv, vector<double>& weightv,
+        bool primary) const;
+
+    /** This function attempts to calculate reduced radiation-field contributions and
+        forced-scattering interaction results for a batch of photon packets in one GPU runtime pass
+        without materializing their path segments on the host. It returns false if the resident
+        GPU-backed path is not available. */
+    bool radiationFieldAndForcedPropagationResultsWithoutPreparedPaths(
+        const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+        const vector<int>& wavelengthBinv, int numWavelengths,
+        const vector<double>& tauinteractv, const vector<double>& pathBiasWeightv,
+        vector<int>& binIndexv, vector<double>& Ldsv, vector<int>& cellv,
+        vector<double>& distancev, vector<double>& tauAbsv, vector<double>& weightv,
+        bool primary) const;
+
+    /** This function attempts to calculate reduced radiation-field contributions and
+        forced-scattering interaction results for a batch of photon packets in one GPU runtime pass
+        without materializing their path segments or precomputing total path optical depths on the
+        host. It uses the supplied uniform random deviates to sample forced interaction optical
+        depths on the GPU. */
+    bool sampledRadiationFieldAndForcedPropagationResultsWithoutPreparedPaths(
+        const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+        const vector<int>& wavelengthBinv, int numWavelengths,
+        const vector<double>& randomSelectv, const vector<double>& randomSamplev,
+        double pathLengthBias, vector<int>& binIndexv, vector<double>& Ldsv,
+        vector<int>& cellv, vector<double>& distancev, vector<double>& tauAbsv,
+        vector<double>& weightv, bool primary) const;
+
+    /** This function attempts the sampled resident forced-scattering GPU pass and additionally
+        returns Henyey-Greenstein outgoing directions for the same packets. It covers the single
+        dust medium, no moving media, unpolarized case and returns false for unsupported
+        configurations. */
+    bool sampledRadiationFieldForcedPropagationAndHenyeyGreensteinScatteringResultsWithoutPreparedPaths(
+        const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+        const vector<int>& wavelengthBinv, int numWavelengths,
+        const vector<double>& randomSelectv, const vector<double>& randomSamplev,
+        double pathLengthBias, const vector<double>& scatterRandomCosthetav,
+        const vector<double>& scatterRandomPhiv, vector<int>& binIndexv,
+        vector<double>& Ldsv, vector<int>& cellv, vector<double>& distancev,
+        vector<double>& tauAbsv, vector<double>& weightv, vector<Direction>& scatterDirectionv,
+        bool primary) const;
+
+    /** This function attempts to calculate extinction optical depths for a batch of peel-off
+        photon packets. It returns false if no GPU-backed batch path is available so callers can
+        fall back to getExtinctionOpticalDepth() for each packet. */
+    bool observedExtinctionOpticalDepths(const vector<PhotonPacket*>& ppv, const vector<double>& distancev,
+                                         vector<double>& tauv) const;
+
+    /** This function attempts to calculate observer-direction extinction optical depths from raw
+        positions, directions, wavelengths, and optional distance limits. It returns false if no
+        GPU-backed batch path is available. */
+    bool observedExtinctionOpticalDepths(const vector<Position>& positionv,
+                                         const vector<Direction>& directionv,
+                                         const vector<double>& lambdav,
+                                         const vector<double>& distancev,
+                                         vector<double>& tauv) const;
+
+    /** This function attempts to calculate observer-direction extinction optical depths from raw
+        positions, a shared direction, wavelengths, and optional distance limits. It returns false
+        if no GPU-backed batch path is available. */
+	    bool observedExtinctionOpticalDepths(const vector<Position>& positionv, const Direction& direction,
+	                                         const vector<double>& lambdav, const vector<double>& distancev,
+	                                         vector<double>& tauv) const;
+
+	    /** This function attempts to calculate observer-direction extinction from raw positions and
+	        a shared direction, project the resulting luminosities onto a distant frame detector,
+	        evaluate band transmissions, and accumulate into a persistent GPU accumulator. It returns
+	        false before accumulation if no supported GPU-backed path is available. */
+	    bool observedFrameBandAccumulate(
+	        const vector<Position>& positionv, const vector<double>& lambdav,
+	        const vector<double>& luminosityv, Direction bfkobs, const vector<double>& distancev,
+	        const void* accumulatorKey, size_t numAccumulatorValues, double costheta, double sintheta,
+	        double cosphi, double sinphi, double cosomega, double sinomega, int numPixelsX,
+	        int numPixelsY, double xpmin, double xpsiz, double ypmin, double ypsiz,
+	        double redshift, size_t numPixelsInFrame, const vector<int>& bandOffsetv,
+	        const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
+	        const vector<double>& bandWidthv) const;
+
+	    /** This function calculates the relative weights of the medium components in a scattering
         event, determined by the scattering opacity \f$k_{m,h}^\text{sca}\f$ of the medium
         component \f$h\f$ in the scattering interaction cell \f$m\f$ obtained from the specified
         photon packet. These opacities are calculated at the specified wavelength (which is assumed
@@ -389,6 +491,49 @@ public:
         calculated, and false if all of the weights are zero (i.e. the photon packet does not
         scatter in this cell). */
     bool weightsForScattering(ShortArray& wv, double lambda, const PhotonPacket* pp) const;
+
+    /** This function returns true if the medium configuration supports the direct GPU
+        Henyey-Greenstein scattering peel-off shortcut for total-only distant frame instruments.
+        This intentionally covers only the single dust medium, no moving media case. */
+    bool supportsSingleHenyeyGreensteinScatteringPeelOff() const;
+
+    /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
+        batch of photon packets observed along the specified direction. The output luminosities
+        correspond to the peel-off photon packets before extinction to the observer. */
+    bool henyeyGreensteinScatteringLuminosities(const vector<PhotonPacket*>& ppv,
+                                                const vector<double>& lambdav,
+                                                Direction bfkobs, vector<double>& luminosityv) const;
+
+    /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
+        batch of photon packets observed along the specified direction, including extinction to
+        the observer. The output luminosities are ready for total-frame detection with zero
+        additional observed optical depth. */
+	    bool henyeyGreensteinScatteringObservedLuminosities(const vector<PhotonPacket*>& ppv,
+	                                                        const vector<Position>& positionv,
+	                                                        const vector<double>& lambdav,
+	                                                        Direction bfkobs,
+	                                                        const vector<double>& distancev,
+	                                                        vector<double>& luminosityv) const;
+
+	    /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
+	        batch of photon packets, includes extinction to the observer, projects onto a distant
+	        frame detector, evaluates band transmissions, and accumulates the total-frame detector
+	        contributions into a persistent GPU accumulator. */
+	    bool henyeyGreensteinScatteringFrameBandAccumulate(
+	        const vector<PhotonPacket*>& ppv, const vector<Position>& positionv,
+	        const vector<double>& lambdav, Direction bfkobs, const vector<double>& distancev,
+	        const void* accumulatorKey, size_t numAccumulatorValues, double costheta, double sintheta,
+	        double cosphi, double sinphi, double cosomega, double sinomega, int numPixelsX,
+	        int numPixelsY, double xpmin, double xpsiz, double ypmin, double ypsiz,
+	        double redshift, size_t numPixelsInFrame, const vector<int>& bandOffsetv,
+	        const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
+	        const vector<double>& bandWidthv) const;
+
+	    /** This function attempts to simulate random-walk Henyey-Greenstein scattering for a batch of
+	        photon packets using the GPU. It covers the common single dust medium, no moving media,
+        unpolarized case and returns false for unsupported configurations so callers can fall back
+        to simulateScattering() per packet. */
+    bool simulateScatteringBatch(Random* random, const vector<PhotonPacket*>& ppv) const;
 
     /** This function calculates the consolidated peel-off photon luminosity and polarization state
         for all medium components with the specified opacity weights and for the given perceived
@@ -474,6 +619,12 @@ public:
         by definition. */
     void setExtinctionOpticalDepths(PhotonPacket* pp) const;
 
+    /** This function attempts to calculate cumulative extinction optical depths for a batch of
+        photon packet paths using a GPU-backed dust-section table path. It returns false if the
+        batch path is unavailable so callers can fall back to setExtinctionOpticalDepths() for
+        each packet. */
+    bool setExtinctionOpticalDepths(const vector<PhotonPacket*>& ppv) const;
+
     /** This function calculates the cumulative scattering and absorption optical depths at the end
         of each path segment along a path through the medium system defined by the initial position
         and direction of the specified PhotonPacket object, and stores the results of the
@@ -510,6 +661,12 @@ public:
         packet object. Note that the optical depth at entry of the initial segment is equal to zero
         by definition. */
     void setScatteringAndAbsorptionOpticalDepths(PhotonPacket* pp) const;
+
+    /** This function attempts to calculate cumulative scattering and absorption optical depths for
+        a batch of photon packet paths using a GPU-backed dust-section table path. It returns
+        false if the batch path is unavailable so callers can fall back to
+        setScatteringAndAbsorptionOpticalDepths() for each packet. */
+    bool setScatteringAndAbsorptionOpticalDepths(const vector<PhotonPacket*>& ppv) const;
 
     /** This function calculates the cumulative extinction optical depth and distance at the end of
         path segments along a path through the medium system defined by the initial position and
@@ -629,6 +786,11 @@ public:
         are out of range, undefined behavior results. */
     void storeRadiationField(bool primary, int m, int ell, double Lds);
 
+    /** This function adds a batch of \f$L\,\Delta s\f$ values to flattened radiation-field bins.
+        If the \em primary flag is true, the values are added to the primary table; otherwise they
+        are added to the temporary secondary table. The additions happen in a thread-safe way. */
+    void storeRadiationField(bool primary, const vector<int>& binIndexv, const vector<double>& Ldsv);
+
     /** This function accumulates the radiation field between multiple processes. In simulation
         modes that record the radiation field, the function should be called in serial code after
         finishing a simulation segment (i.e. after a before set of photon packets has been
@@ -636,6 +798,18 @@ public:
         true, the primary table is synchronized; otherwise the temporary secondary table is
         synchronized and its contents is copied into the stable secondary table. */
     void communicateRadiationField(bool primary);
+
+    /** This function calculates the bolometric luminosity absorbed by dust media in each spatial
+        cell, respectively using the partial radiation field stored in the primary table and the
+        stable secondary table. It returns true if the GPU-backed calculation was performed, and
+        false if callers should use the generic CPU path. */
+    bool dustAbsorbedLuminosities(Array& Labs1v, Array& Labs2v) const;
+
+    /** This function calculates the total bolometric luminosity absorbed by dust media,
+        respectively using the primary and stable secondary radiation field tables. It returns
+        true if the GPU-backed calculation was performed, and false if callers should use the
+        generic CPU path. */
+    bool totalDustAbsorbedLuminosity(double& Labs1, double& Labs2) const;
 
     /** This function returns a pair of values specifying the bolometric luminosity absorbed by
         dust media across the complete domain of the spatial grid, respectively using the partial
@@ -838,7 +1012,6 @@ public:
 
     //======================== Data Members ========================
 
-private:
     Configuration* _config{nullptr};
 
     // relevant for any simulation mode that includes a medium
@@ -854,6 +1027,18 @@ private:
     vector<int> _elec_hv;  // a list of indices for media components containing electrons
     vector<int> _pdms_hv;  // a list of indices for media components with a primary dynamic medium state
     vector<int> _sdms_hv;  // a list of indices for media components with a secondary dynamic medium state
+
+    // flattened DustMix section tables for GPU lookup in dust-only constant-section configurations
+    bool _hasGpuDustSectionTables{false};
+    vector<int> _gpuDustSectionMedia;               // media index per flattened table
+    vector<int> _gpuDustSectionLookupBegin;         // start index in the flattened section arrays
+    vector<int> _gpuDustSectionLookupCount;         // number of lookup samples per medium
+    vector<double> _gpuDustSectionLookupWavelength; // shifted wavelength lookup grid
+    vector<double> _gpuDustSectionAbs;
+    vector<double> _gpuDustSectionSca;
+    vector<double> _gpuDustSectionExt;
+    vector<double> _gpuDustSectionAsymm;
+    bool _hasGpuSingleHenyeyGreensteinTable{false};
 
     // relevant for any simulation mode that stores the radiation field
     WavelengthGrid* _wavelengthGrid{0};  // index ell

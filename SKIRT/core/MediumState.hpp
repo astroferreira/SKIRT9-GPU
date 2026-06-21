@@ -262,6 +262,18 @@ public:
         component with index \f$h\f$ in the spatial cell with index \f$m\f$. */
     double custom(int m, int h, int i) const { return _data[_numVars * m + _off_cust[h] + i]; }
 
+    /** This function returns a read-only pointer to the contiguous state variable storage. */
+    const double* data() const { return std::begin(_data); }
+
+    /** This function returns the number of values in the contiguous state variable storage. */
+    size_t dataSize() const { return _data.size(); }
+
+    /** This function returns the number of state variables stored for each cell. */
+    int numVars() const { return _numVars; }
+
+    /** This function returns the offset of the number density for the specified medium component. */
+    int numberDensityOffset(int h) const { return _off_dens[h]; }
+
     //======================== Data Members ========================
 
 private:

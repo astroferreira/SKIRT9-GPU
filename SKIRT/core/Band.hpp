@@ -93,6 +93,15 @@ public:
         */
     double effectiveWidth() const;
 
+    /** This function returns the number of samples in the normalized transmission table. */
+    size_t transmissionDataSize() const { return _size; }
+
+    /** This function returns a pointer to the normalized transmission table wavelengths. */
+    const double* transmissionWavelengthData() const { return _lambdav; }
+
+    /** This function returns a pointer to the normalized transmission table values. */
+    const double* transmissionValueData() const { return _transv; }
+
     //============== Functions to be implemented in subclasses ============
 
 protected:

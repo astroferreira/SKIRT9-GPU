@@ -222,6 +222,16 @@ public:
         finds the appropriate leaf cell. */
     int cellIndex(Position bfr) const;
 
+    /** These functions return flattened, read-only node hierarchy data for accelerated path
+        traversal. Node bounds are stored as consecutive xmin, ymin, zmin, xmax, ymax, zmax values;
+        child indices are stored in a single flat list addressed by the begin/count vectors; and
+        node cell indices are -1 for nonleaf nodes. */
+    const vector<double>& traversalNodeBounds() const { return _traversalNodeBounds; }
+    const vector<int>& traversalChildBegin() const { return _traversalChildBegin; }
+    const vector<int>& traversalChildCount() const { return _traversalChildCount; }
+    const vector<int>& traversalChildIndex() const { return _traversalChildIndex; }
+    const vector<int>& traversalCellIndex() const { return _traversalCellIndex; }
+
 protected:
     /** This function returns a reference to an array containing the imported properties (in column
         order) for the cell with index \f$0\le m \le N_\mathrm{ent}-1\f$. If the index is out of
@@ -262,6 +272,11 @@ private:
     class Node;
     Node* _root{nullptr};  // root node representing the complete domain
     vector<Node*> _cells;  // leaf nodes indexed on m
+    vector<double> _traversalNodeBounds;
+    vector<int> _traversalChildBegin;
+    vector<int> _traversalChildCount;
+    vector<int> _traversalChildIndex;
+    vector<int> _traversalCellIndex;
 
     // data members initialized when processing snapshot input, but only if a density policy has been set
     Array _rhov;       // density for each cell (not normalized)

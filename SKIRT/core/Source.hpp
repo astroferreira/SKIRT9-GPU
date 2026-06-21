@@ -127,6 +127,11 @@ public:
         (re-)initialized so that it is ready to start its lifecycle. */
     virtual void launch(PhotonPacket* pp, size_t historyIndex, double L) const = 0;
 
+    /** This function launches a contiguous range of photon packets from the source. The default
+        implementation invokes launch() for each packet; subclasses can override this to reuse
+        per-range setup or to offload batch launch preparation. */
+    virtual void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const;
+
     //======================== Other Functions =======================
 
 protected:

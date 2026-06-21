@@ -86,6 +86,16 @@ public:
         manipulating cell indices. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return the number of bins in each coordinate direction. */
+    int numBinsX() const { return _Nx; }
+    int numBinsY() const { return _Ny; }
+    int numBinsZ() const { return _Nz; }
+
+    /** These functions return the grid border coordinates in each coordinate direction. */
+    const Array& xBorderPositions() const { return _xv; }
+    const Array& yBorderPositions() const { return _yv; }
+    const Array& zBorderPositions() const { return _zv; }
+
 protected:
     /** This function writes the intersection of the grid structure with the xy plane to the
         specified SpatialGridPlotFile object. */

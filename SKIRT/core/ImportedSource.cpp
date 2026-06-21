@@ -7,6 +7,7 @@
 #include "Band.hpp"
 #include "Configuration.hpp"
 #include "FatalError.hpp"
+#include "GpuAcceleration.hpp"
 #include "Log.hpp"
 #include "NR.hpp"
 #include "Parallel.hpp"
@@ -18,6 +19,15 @@
 #include "Snapshot.hpp"
 #include "VelocityInterface.hpp"
 #include "WavelengthGrid.hpp"
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <mutex>
+#include <utility>
 
 ////////////////////////////////////////////////////////////////////
 
@@ -25,6 +35,33 @@ namespace
 {
     // maximum number of luminosity calculations between two invocations of infoIfElapsed()
     const size_t logProgressChunkSize = 10000;
+
+    bool profileLaunchEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_PROFILE_LAUNCH");
+        if (!value) return false;
+        string text(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return !(text.empty() || text == "0" || text == "false" || text == "off" || text == "no");
+    }
+
+    size_t profileLaunchLimit()
+    {
+        const char* text = std::getenv("SKIRTGPU_PROFILE_LAUNCH_LIMIT");
+        if (!text) return 8;
+        char* end = nullptr;
+        unsigned long value = std::strtoul(text, &end, 10);
+        return end != text ? static_cast<size_t>(value) : 8;
+    }
+
+    double profileMilliseconds(std::chrono::steady_clock::time_point begin,
+                               std::chrono::steady_clock::time_point end)
+    {
+        return std::chrono::duration<double, std::milli>(end - begin).count();
+    }
+
+    std::atomic<size_t> _profileLaunchCall{0};
+    std::mutex _profileLaunchMutex;
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -87,7 +124,29 @@ void ImportedSource::setupSelfAfter()
         auto log = find<Log>();
         log->info("Calculating luminosities for " + std::to_string(M) + " imported entities...");
         log->infoSetElapsed(M);
-        find<ParallelFactory>()->parallelDistributed()->call(M, [this, log](size_t firstIndex, size_t numIndices) {
+        bool done = false;
+        if (GpuAcceleration::isProcessEnabled())
+        {
+            auto parameterInfo = _sedFamily->parameterInfo();
+            vector<double> flattenedParameters(static_cast<size_t>(M) * parameterInfo.size());
+            Array params;
+            for (int m = 0; m != M; ++m)
+            {
+                _snapshot->parameters(m, params);
+                for (size_t p = 0; p != parameterInfo.size(); ++p)
+                    flattenedParameters[static_cast<size_t>(m) * parameterInfo.size() + p] = params[p];
+            }
+
+            vector<double> luminosities;
+            if (_sedFamily->cdfBatch(luminosities, _wavelengthRange, flattenedParameters, M)
+                && luminosities.size() == static_cast<size_t>(M))
+            {
+                for (int m = 0; m != M; ++m) _Lv[m] = luminosities[m];
+                done = true;
+            }
+        }
+
+        if (!done) find<ParallelFactory>()->parallelDistributed()->call(M, [this, log](size_t firstIndex, size_t numIndices) {
             // the contents of these three arrays is not used, so this could be optimized if needed
             Array lambdav, pv, Pv;
             Array params;
@@ -105,7 +164,7 @@ void ImportedSource::setupSelfAfter()
                 numIndices -= currentChunkSize;
             }
         });
-        ProcessManager::sumToAll(_Lv);
+        if (!done) ProcessManager::sumToAll(_Lv);
 
         // save the bias and biased luminosity and normalize both vectors
         if (_snapshot->hasBias())
@@ -230,6 +289,11 @@ double ImportedSource::meanSpecificLuminosity(const Band* band, int m) const
 
 void ImportedSource::prepareForLaunch(double sourceBias, size_t firstIndex, size_t numIndices)
 {
+    _hasLaunchSpectra = false;
+    _launchSpectraFirstIndex = 0;
+    _launchWavelengthv.clear();
+    _launchSpectralWeightv.clear();
+
     // skip preparation if there are no entities
     int M = _snapshot->numEntities();
     if (!M) return;
@@ -252,6 +316,84 @@ void ImportedSource::prepareForLaunch(double sourceBias, size_t firstIndex, size
         _Iv[m] = firstIndex + min(numIndices, static_cast<size_t>(std::round(W * numIndices)));
     }
     _Iv[M] = firstIndex + numIndices;
+
+    prepareGpuLaunchSpectra(firstIndex, numIndices);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool ImportedSource::prepareGpuLaunchSpectra(size_t firstIndex, size_t numIndices)
+{
+    if (!GpuAcceleration::isProcessEnabled() || !numIndices || _oligochromatic) return false;
+
+    auto parameterInfo = _sedFamily->parameterInfo();
+    if (parameterInfo.empty()) return false;
+
+    vector<double> flattenedParameters(numIndices * parameterInfo.size(), 0.);
+    vector<double> intrinsicRandoms(numIndices, 0.5);
+    vector<double> forcedWavelengths;
+    if (_xi) forcedWavelengths.assign(numIndices, 0.);
+
+    Array params;
+    size_t sample = 0;
+    int M = _snapshot->numEntities();
+    for (int m = 0; m != M; ++m)
+    {
+        size_t count = _Iv[m + 1] - _Iv[m];
+        if (!count) continue;
+
+        _snapshot->parameters(m, params);
+        for (size_t i = 0; i != count; ++i)
+        {
+            size_t offset = sample * parameterInfo.size();
+            for (size_t p = 0; p != parameterInfo.size(); ++p) flattenedParameters[offset + p] = params[p];
+
+            // Match the source wavelength mixture statistically while keeping zero-luminosity
+            // packets from consuming random numbers they would not use in the scalar path.
+            if (_Lv[m])
+            {
+                if (!_xi)
+                    intrinsicRandoms[sample] = random()->uniform();
+                else if (random()->uniform() > _xi)
+                    intrinsicRandoms[sample] = random()->uniform();
+                else
+                    forcedWavelengths[sample] = _biasDistribution->generateWavelength();
+            }
+            ++sample;
+        }
+    }
+    if (sample != numIndices) return false;
+
+    vector<double> wavelengths;
+    vector<double> specificLuminosities;
+    if (!_sedFamily->sampleWavelengthBatch(wavelengths, specificLuminosities, _wavelengthRange, flattenedParameters,
+                                           intrinsicRandoms, forcedWavelengths, numIndices)
+        || wavelengths.size() != numIndices || specificLuminosities.size() != numIndices)
+        return false;
+
+    _launchSpectralWeightv.assign(numIndices, 1.);
+    if (_xi)
+    {
+        for (size_t i = 0; i != numIndices; ++i)
+        {
+            double s = specificLuminosities[i];
+            if (s <= 0.)
+            {
+                _launchSpectralWeightv[i] = 0.;
+            }
+            else
+            {
+                double b = _biasDistribution->probability(wavelengths[i]);
+                double q = (1. - _xi) * s + _xi * b;
+                _launchSpectralWeightv[i] = q > 0. ? s / q : 0.;
+            }
+        }
+    }
+
+    _launchWavelengthv = std::move(wavelengths);
+    _launchSpectraFirstIndex = firstIndex;
+    _hasLaunchSpectra = true;
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -325,10 +467,194 @@ void ImportedSource::launch(PhotonPacket* pp, size_t historyIndex, double L) con
 {
     // select the entity corresponding to this history index
     auto m = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+    launchFromEntity(pp, historyIndex, L, static_cast<int>(m));
+}
 
+////////////////////////////////////////////////////////////////////
+
+void ImportedSource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const
+{
+    if (!numPackets) return;
+
+    if (!GpuAcceleration::isProcessEnabled() || _importVelocity)
+    {
+        size_t endHistoryIndex = firstHistoryIndex + numPackets;
+        size_t offset = 0;
+        while (offset != numPackets)
+        {
+            size_t historyIndex = firstHistoryIndex + offset;
+            auto entity = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+            int m = static_cast<int>(entity);
+            size_t entityEnd = m >= 0 && static_cast<size_t>(m + 1) < _Iv.size() ? _Iv[m + 1] : historyIndex + 1;
+            size_t count = min(endHistoryIndex, entityEnd) - historyIndex;
+            for (size_t i = 0; i != count; ++i)
+                launchFromEntity(&ppv[offset + i], historyIndex + i, L, m);
+            offset += count;
+        }
+        return;
+    }
+
+    bool profileLaunch = profileLaunchEnabled();
+    size_t profileCall = 0;
+    if (profileLaunch)
+    {
+        profileCall = _profileLaunchCall.fetch_add(1, std::memory_order_relaxed);
+        size_t limit = profileLaunchLimit();
+        if (limit != 0 && profileCall >= limit) profileLaunch = false;
+    }
+    auto profileStart = std::chrono::steady_clock::now();
+    double profileWavelengthMs = 0.;
+    double profilePositionMs = 0.;
+    double profileRandomMs = 0.;
+    double profileDirectionMs = 0.;
+    double profilePacketMs = 0.;
+
+    vector<size_t> activeOffsetv;
+    vector<size_t> activeHistoryIndexv;
+    vector<double> lambdav;
+    vector<double> luminosityv;
+    vector<Position> positionv;
+    vector<double> randomCosthetav;
+    vector<double> randomPhiv;
+    activeOffsetv.reserve(numPackets);
+    activeHistoryIndexv.reserve(numPackets);
+    lambdav.reserve(numPackets);
+    luminosityv.reserve(numPackets);
+    positionv.reserve(numPackets);
+    randomCosthetav.reserve(numPackets);
+    randomPhiv.reserve(numPackets);
+
+    size_t endHistoryIndex = firstHistoryIndex + numPackets;
+    size_t offset = 0;
+    while (offset != numPackets)
+    {
+        size_t historyIndex = firstHistoryIndex + offset;
+        auto entity = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+        int m = static_cast<int>(entity);
+        size_t entityEnd = m >= 0 && static_cast<size_t>(m + 1) < _Iv.size() ? _Iv[m + 1] : historyIndex + 1;
+        size_t count = min(endHistoryIndex, entityEnd) - historyIndex;
+        for (size_t i = 0; i != count; ++i)
+        {
+            size_t packetOffset = offset + i;
+            size_t packetHistoryIndex = historyIndex + i;
+            if (m < 0 || static_cast<size_t>(m) >= _Lv.size() || !_Lv[m])
+            {
+                ppv[packetOffset].launch(packetHistoryIndex, _arbitaryWavelength, 0., Position(), Direction());
+                continue;
+            }
+
+            double ws = _Lv[m] / _Wv[m];
+            double lambda, w;
+            std::chrono::steady_clock::time_point profileStageStart;
+            if (profileLaunch) profileStageStart = std::chrono::steady_clock::now();
+            bool hasPrecomputedSpectrum = false;
+            size_t launchSpectraIndex = 0;
+            if (_hasLaunchSpectra && packetHistoryIndex >= _launchSpectraFirstIndex)
+            {
+                launchSpectraIndex = packetHistoryIndex - _launchSpectraFirstIndex;
+                hasPrecomputedSpectrum = launchSpectraIndex < _launchWavelengthv.size();
+            }
+            if (hasPrecomputedSpectrum)
+            {
+                lambda = _launchWavelengthv[launchSpectraIndex];
+                w = _launchSpectralWeightv[launchSpectraIndex];
+            }
+            else
+            {
+                t_sed.setIfNeeded(m, _snapshot, _sedFamily, _wavelengthRange);
+                if (!_xi)
+                {
+                    lambda = t_sed.generateWavelength(random());
+                    w = 1.;
+                }
+                else
+                {
+                    if (random()->uniform() > _xi)
+                        lambda = t_sed.generateWavelength(random());
+                    else
+                        lambda = _biasDistribution->generateWavelength();
+
+                    double s = t_sed.specificLuminosity(lambda);
+                    if (!s)
+                    {
+                        w = 0.;
+                    }
+                    else
+                    {
+                        double b = _biasDistribution->probability(lambda);
+                        w = s / ((1 - _xi) * s + _xi * b);
+                    }
+                }
+            }
+            if (profileLaunch)
+            {
+                auto profileNow = std::chrono::steady_clock::now();
+                profileWavelengthMs += profileMilliseconds(profileStageStart, profileNow);
+                profileStageStart = profileNow;
+            }
+
+            activeOffsetv.push_back(packetOffset);
+            activeHistoryIndexv.push_back(packetHistoryIndex);
+            lambdav.push_back(lambda);
+            luminosityv.push_back(L * w * ws);
+            positionv.push_back(_snapshot->generatePosition(m));
+            if (profileLaunch)
+            {
+                auto profileNow = std::chrono::steady_clock::now();
+                profilePositionMs += profileMilliseconds(profileStageStart, profileNow);
+                profileStageStart = profileNow;
+            }
+            randomCosthetav.push_back(random()->uniform());
+            randomPhiv.push_back(random()->uniform());
+            if (profileLaunch)
+                profileRandomMs += profileMilliseconds(profileStageStart, std::chrono::steady_clock::now());
+        }
+        offset += count;
+    }
+
+    vector<double> directionv;
+    auto profileDirectionStart = std::chrono::steady_clock::now();
+    bool useGpuDirections = GpuAcceleration::isotropicDirections(randomCosthetav, randomPhiv, directionv)
+                            && directionv.size() == 3 * activeOffsetv.size();
+    if (profileLaunch)
+        profileDirectionMs = profileMilliseconds(profileDirectionStart, std::chrono::steady_clock::now());
+    auto profilePacketStart = std::chrono::steady_clock::now();
+    for (size_t i = 0; i != activeOffsetv.size(); ++i)
+    {
+        Direction bfk = useGpuDirections
+                            ? Direction(directionv[3 * i], directionv[3 * i + 1], directionv[3 * i + 2], false)
+                            : Direction(acos(2. * randomCosthetav[i] - 1.), 2. * M_PI * randomPhiv[i]);
+        ppv[activeOffsetv[i]].launch(activeHistoryIndexv[i], lambdav[i], luminosityv[i], positionv[i], bfk, nullptr);
+    }
+    if (profileLaunch)
+    {
+        auto profileEnd = std::chrono::steady_clock::now();
+        profilePacketMs = profileMilliseconds(profilePacketStart, profileEnd);
+        double totalMs = profileMilliseconds(profileStart, profileEnd);
+        double knownMs = profileWavelengthMs + profilePositionMs + profileRandomMs + profileDirectionMs
+                         + profilePacketMs;
+        std::lock_guard<std::mutex> lock(_profileLaunchMutex);
+        std::cerr << "SKIRTGPU launch profile call=" << profileCall
+                  << " packets=" << numPackets
+                  << " active=" << activeOffsetv.size()
+                  << " gpu_dir=" << (useGpuDirections ? "yes" : "no")
+                  << " wavelength_ms=" << profileWavelengthMs
+                  << " position_ms=" << profilePositionMs
+                  << " random_ms=" << profileRandomMs
+                  << " direction_ms=" << profileDirectionMs
+                  << " packet_ms=" << profilePacketMs
+                  << " overhead_ms=" << (totalMs - knownMs)
+                  << " total_ms=" << totalMs << '\n';
+    }
+}
+
+////////////////////////////////////////////////////////////////////
+
+void ImportedSource::launchFromEntity(PhotonPacket* pp, size_t historyIndex, double L, int m) const
+{
     // if there are no entities in the source, or the selected entity has no contribution,
     // launch a photon packet with zero luminosity
-    if (m < 0 || !_Lv[m])
+    if (m < 0 || static_cast<size_t>(m) >= _Lv.size() || !_Lv[m])
     {
         pp->launch(historyIndex, _arbitaryWavelength, 0., Position(), Direction());
         return;
@@ -337,39 +663,54 @@ void ImportedSource::launch(PhotonPacket* pp, size_t historyIndex, double L) con
     // calculate the weight related to biased source selection
     double ws = _Lv[m] / _Wv[m];
 
-    // get the normalized regular and cumulative distributions for this entity, if not already available
-    t_sed.setIfNeeded(m, _snapshot, _sedFamily, _wavelengthRange);
-
     // generate a random wavelength from the SED and/or from the bias distribution
     double lambda, w;
-    if (!_xi)
+    bool hasPrecomputedSpectrum = false;
+    size_t launchSpectraIndex = 0;
+    if (_hasLaunchSpectra && historyIndex >= _launchSpectraFirstIndex)
     {
-        // no biasing -- simply use the intrinsic spectral distribution
-        lambda = t_sed.generateWavelength(random());
-        w = 1.;
+        launchSpectraIndex = historyIndex - _launchSpectraFirstIndex;
+        hasPrecomputedSpectrum = launchSpectraIndex < _launchWavelengthv.size();
+    }
+    if (hasPrecomputedSpectrum)
+    {
+        lambda = _launchWavelengthv[launchSpectraIndex];
+        w = _launchSpectralWeightv[launchSpectraIndex];
     }
     else
     {
-        // biasing -- use one or the other distribution
-        if (random()->uniform() > _xi)
-            lambda = t_sed.generateWavelength(random());
-        else
-            lambda = _biasDistribution->generateWavelength();
+        // get the normalized regular and cumulative distributions for this entity, if not already available
+        t_sed.setIfNeeded(m, _snapshot, _sedFamily, _wavelengthRange);
 
-        // calculate the compensating weight factor
-        double s = t_sed.specificLuminosity(lambda);
-        if (!s)
+        if (!_xi)
         {
-            // if the wavelength can't occur in the intrinsic distribution,
-            // the weight factor is zero regardless of the probability in the bias distribution
-            // (handling this separately also avoids NaNs in the pathological case s=b=0)
-            w = 0.;
+            // no biasing -- simply use the intrinsic spectral distribution
+            lambda = t_sed.generateWavelength(random());
+            w = 1.;
         }
         else
         {
-            // regular composite bias weight
-            double b = _biasDistribution->probability(lambda);
-            w = s / ((1 - _xi) * s + _xi * b);
+            // biasing -- use one or the other distribution
+            if (random()->uniform() > _xi)
+                lambda = t_sed.generateWavelength(random());
+            else
+                lambda = _biasDistribution->generateWavelength();
+
+            // calculate the compensating weight factor
+            double s = t_sed.specificLuminosity(lambda);
+            if (!s)
+            {
+                // if the wavelength can't occur in the intrinsic distribution,
+                // the weight factor is zero regardless of the probability in the bias distribution
+                // (handling this separately also avoids NaNs in the pathological case s=b=0)
+                w = 0.;
+            }
+            else
+            {
+                // regular composite bias weight
+                double b = _biasDistribution->probability(lambda);
+                w = s / ((1 - _xi) * s + _xi * b);
+            }
         }
     }
 

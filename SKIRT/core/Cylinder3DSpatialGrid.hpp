@@ -122,6 +122,20 @@ public:
         intersection point. */
     std::unique_ptr<PathSegmentGenerator> createPathSegmentGenerator() const override;
 
+    /** These functions return the number of radial, azimuthal, and vertical bins. */
+    int numRadialBins() const { return _NR; }
+    int numAzimuthalBins() const { return _Nphi; }
+    int numZBins() const { return _Nz; }
+
+    /** These functions return the precomputed coordinate border data used for path traversal. */
+    const Array& radialBorderPositions() const { return _Rv; }
+    const Array& azimuthalBorderAngles() const { return _phiv; }
+    const Array& zBorderPositions() const { return _zv; }
+    const Array& azimuthalBorderSines() const { return _sinv; }
+    const Array& azimuthalBorderCosines() const { return _cosv; }
+    double traversalEpsilon() const { return _eps; }
+    bool hasCentralHole() const { return _hasHole; }
+
 protected:
     /** This function writes the intersection of the grid with the xy plane to the specified
         SpatialGridPlotFile object. */

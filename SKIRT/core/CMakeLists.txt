@@ -25,6 +25,7 @@ include_directories(../../SMILE/schema ../../SMILE/fundamentals)
 target_link_libraries(${TARGET} fitsio voro mpi utils tetgen)
 include_directories(../fitsio ../voro ../mpi ../utils)
 include_directories(SYSTEM ../tetgen)  # suppress warnings in tetgen header
+target_link_libraries(${TARGET} ${CMAKE_DL_LIBS})
 
 # adjust C++ compiler flags to our needs
 include("../../SMILE/build/CompilerFlags.cmake")

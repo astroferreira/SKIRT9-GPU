@@ -722,6 +722,24 @@ void VoronoiMeshSnapshot::buildMesh(bool relax)
     }
     double avgNeighbors = double(totNeighbors) / numCells;
 
+    _traversalSiteCoordinates.clear();
+    _traversalNeighborBegin.resize(numCells);
+    _traversalNeighborCount.resize(numCells);
+    _traversalNeighborIndex.clear();
+    _traversalSiteCoordinates.reserve(3 * static_cast<size_t>(numCells));
+    _traversalNeighborIndex.reserve(static_cast<size_t>(totNeighbors));
+    for (int m = 0; m < numCells; m++)
+    {
+        Vec r = _cells[m]->position();
+        _traversalSiteCoordinates.push_back(r.x());
+        _traversalSiteCoordinates.push_back(r.y());
+        _traversalSiteCoordinates.push_back(r.z());
+        const vector<int>& neighbors = _cells[m]->neighbors();
+        _traversalNeighborBegin[m] = static_cast<int>(_traversalNeighborIndex.size());
+        _traversalNeighborCount[m] = static_cast<int>(neighbors.size());
+        _traversalNeighborIndex.insert(_traversalNeighborIndex.end(), neighbors.begin(), neighbors.end());
+    }
+
     // log neighbor statistics
     log()->info("Done computing Voronoi tessellation with " + std::to_string(numCells) + " cells");
     log()->info("  Average number of neighbors per cell: " + StringUtils::toString(avgNeighbors, 'f', 1));
@@ -798,6 +816,19 @@ void VoronoiMeshSnapshot::buildSearchPerBlock()
         maxRefsPerBlock = max(maxRefsPerBlock, refs);
     }
     double avgRefsPerBlock = double(totalBlockRefs) / _nb3;
+
+    _traversalBlockGridN = _nb;
+    _traversalBlockBegin.resize(_nb3);
+    _traversalBlockCount.resize(_nb3);
+    _traversalBlockIndex.clear();
+    _traversalBlockIndex.reserve(static_cast<size_t>(totalBlockRefs));
+    for (int b = 0; b < _nb3; b++)
+    {
+        const vector<int>& ids = _blocklists[b];
+        _traversalBlockBegin[b] = static_cast<int>(_traversalBlockIndex.size());
+        _traversalBlockCount[b] = static_cast<int>(ids.size());
+        _traversalBlockIndex.insert(_traversalBlockIndex.end(), ids.begin(), ids.end());
+    }
 
     // log block list statistics
     log()->info("  Number of blocks in search grid: " + std::to_string(_nb3) + " (" + std::to_string(_nb) + "^3)");

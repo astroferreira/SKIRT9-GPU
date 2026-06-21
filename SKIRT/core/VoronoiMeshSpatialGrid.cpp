@@ -194,6 +194,69 @@ std::unique_ptr<PathSegmentGenerator> VoronoiMeshSpatialGrid::createPathSegmentG
 
 //////////////////////////////////////////////////////////////////////
 
+const vector<double>& VoronoiMeshSpatialGrid::traversalSiteCoordinates() const
+{
+    return _mesh->traversalSiteCoordinates();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& VoronoiMeshSpatialGrid::traversalNeighborBegin() const
+{
+    return _mesh->traversalNeighborBegin();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& VoronoiMeshSpatialGrid::traversalNeighborCount() const
+{
+    return _mesh->traversalNeighborCount();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const vector<int>& VoronoiMeshSpatialGrid::traversalNeighborIndex() const
+{
+    return _mesh->traversalNeighborIndex();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+int VoronoiMeshSpatialGrid::traversalBlockGridN() const
+{
+    return _mesh->traversalBlockGridN();
+}
+
+////////////////////////////////////////////////////////////////////
+
+const vector<int>& VoronoiMeshSpatialGrid::traversalBlockBegin() const
+{
+    return _mesh->traversalBlockBegin();
+}
+
+////////////////////////////////////////////////////////////////////
+
+const vector<int>& VoronoiMeshSpatialGrid::traversalBlockCount() const
+{
+    return _mesh->traversalBlockCount();
+}
+
+////////////////////////////////////////////////////////////////////
+
+const vector<int>& VoronoiMeshSpatialGrid::traversalBlockIndex() const
+{
+    return _mesh->traversalBlockIndex();
+}
+
+////////////////////////////////////////////////////////////////////
+
+double VoronoiMeshSpatialGrid::traversalEpsilon() const
+{
+    return _mesh->traversalEpsilon();
+}
+
+//////////////////////////////////////////////////////////////////////
+
 void VoronoiMeshSpatialGrid::writeGridPlotFiles(const SimulationItem* probe) const
 {
     _mesh->writeGridPlotFiles(probe);

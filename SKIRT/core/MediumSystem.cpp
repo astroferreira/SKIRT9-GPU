@@ -4,10 +4,16 @@
 ///////////////////////////////////////////////////////////////// */
 
 #include "MediumSystem.hpp"
+#include "AdaptiveMeshSpatialGrid.hpp"
+#include "CartesianSpatialGrid.hpp"
 #include "Configuration.hpp"
+#include "Cylinder2DSpatialGrid.hpp"
+#include "Cylinder3DSpatialGrid.hpp"
 #include "DensityInCellInterface.hpp"
 #include "DisjointWavelengthGrid.hpp"
+#include "DustMix.hpp"
 #include "FatalError.hpp"
+#include "GpuAcceleration.hpp"
 #include "LockFree.hpp"
 #include "Log.hpp"
 #include "LyaUtils.hpp"
@@ -21,7 +27,17 @@
 #include "ProcessManager.hpp"
 #include "Random.hpp"
 #include "ShortArray.hpp"
+#include "Sphere1DSpatialGrid.hpp"
+#include "Sphere2DSpatialGrid.hpp"
+#include "Sphere3DSpatialGrid.hpp"
 #include "StringUtils.hpp"
+#include "TetraMeshSpatialGrid.hpp"
+#include "TreeSpatialGrid.hpp"
+#include "VoronoiMeshSpatialGrid.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <mutex>
 
 ////////////////////////////////////////////////////////////////////
 
@@ -29,6 +45,39 @@ namespace
 {
     // maximum number of cell densities calculated between two invocations of infoIfElapsed()
     const size_t logProgressChunkSize = 10000;
+
+    bool environmentFlag(const char* name, bool fallback)
+    {
+        const char* value = std::getenv(name);
+        if (!value) return fallback;
+        string text(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return !(text.empty() || text == "0" || text == "false" || text == "off" || text == "no");
+    }
+
+    bool directRadiationFieldAccumulatorEnabled()
+    {
+        return environmentFlag("SKIRTGPU_RF_ACCUMULATOR_DIRECT", true);
+    }
+
+    size_t environmentSizeValue(const char* name, size_t fallback)
+    {
+        const char* text = std::getenv(name);
+        if (!text) return fallback;
+        char* end = nullptr;
+        unsigned long value = std::strtoul(text, &end, 10);
+        return end != text && value > 0 ? static_cast<size_t>(value) : fallback;
+    }
+
+    std::mutex _radiationFieldBulkStoreMutex;
+}
+
+////////////////////////////////////////////////////////////////////
+
+namespace
+{
+    SpatialGridPath limitedPathForDistance(SpatialGrid* grid, const SpatialGridPath* source, double distance);
+    bool setCompletePathsForTraversal(SpatialGrid* grid, const vector<PhotonPacket*>& ppv);
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -279,6 +328,72 @@ void MediumSystem::setupSelfAfter()
         }
     }
 
+    // Cache DustMix section lookup tables for GPU-side wavelength evaluation in the common
+    // constant-section, dust-only case.
+    if ((_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()) && !_mixPerCell
+        && static_cast<int>(_dust_hv.size()) == _numMedia)
+    {
+        bool ok = true;
+        for (int h = 0; h != _numMedia && ok; ++h)
+        {
+            auto dust = dynamic_cast<const DustMix*>(mix(0, h));
+            if (!dust)
+            {
+                ok = false;
+                break;
+            }
+
+            const Array& lookupv = dust->sectionLookupWavelengths();
+            const Array& absv = dust->sectionAbsValues();
+            const Array& scav = dust->sectionScaValues();
+            const Array& extv = dust->sectionExtValues();
+            const Array& asymmv = dust->sectionAsymmValues();
+            if (lookupv.size() < 2 || absv.size() != lookupv.size() || scav.size() != lookupv.size()
+                || extv.size() != lookupv.size() || asymmv.size() != lookupv.size())
+            {
+                ok = false;
+                break;
+            }
+
+            _gpuDustSectionMedia.push_back(h);
+            _gpuDustSectionLookupBegin.push_back(static_cast<int>(_gpuDustSectionLookupWavelength.size()));
+            _gpuDustSectionLookupCount.push_back(static_cast<int>(lookupv.size()));
+            for (size_t ell = 0; ell != lookupv.size(); ++ell)
+            {
+                _gpuDustSectionLookupWavelength.push_back(lookupv[ell]);
+                _gpuDustSectionAbs.push_back(absv[ell]);
+                _gpuDustSectionSca.push_back(scav[ell]);
+                _gpuDustSectionExt.push_back(extv[ell]);
+                _gpuDustSectionAsymm.push_back(asymmv[ell]);
+            }
+        }
+
+        _hasGpuDustSectionTables = ok && !_gpuDustSectionMedia.empty();
+        _hasGpuSingleHenyeyGreensteinTable =
+            _hasGpuDustSectionTables && _numMedia == 1
+            && static_cast<const DustMix*>(mix(0, 0))->scatteringMode() == DustMix::ScatteringMode::HenyeyGreenstein;
+        if (!_hasGpuDustSectionTables)
+        {
+            _gpuDustSectionMedia.clear();
+            _gpuDustSectionLookupBegin.clear();
+            _gpuDustSectionLookupCount.clear();
+            _gpuDustSectionLookupWavelength.clear();
+            _gpuDustSectionAbs.clear();
+            _gpuDustSectionSca.clear();
+            _gpuDustSectionExt.clear();
+            _gpuDustSectionAsymm.clear();
+            _hasGpuSingleHenyeyGreensteinTable = false;
+        }
+        allocatedBytes += _gpuDustSectionMedia.size() * sizeof(int);
+        allocatedBytes += _gpuDustSectionLookupBegin.size() * sizeof(int);
+        allocatedBytes += _gpuDustSectionLookupCount.size() * sizeof(int);
+        allocatedBytes += _gpuDustSectionLookupWavelength.size() * sizeof(double);
+        allocatedBytes += _gpuDustSectionAbs.size() * sizeof(double);
+        allocatedBytes += _gpuDustSectionSca.size() * sizeof(double);
+        allocatedBytes += _gpuDustSectionExt.size() * sizeof(double);
+        allocatedBytes += _gpuDustSectionAsymm.size() * sizeof(double);
+    }
+
     // ----- inform user about allocated memory -----
 
     log->info(typeAndName() + " allocated " + StringUtils::toMemSizeString(allocatedBytes) + " of memory");
@@ -393,6 +508,7 @@ void MediumSystem::setupSelfAfter()
 
     // calculate the initial aggregate state, if needed
     _state.calculateAggregate();
+    GpuAcceleration::invalidateMediumState(_state);
 
     log->info("Done calculating medium properties");
 }
@@ -680,6 +796,34 @@ double MediumSystem::albedoForScattering(const PhotonPacket* pp) const
     int m = pp->interactionCellIndex();
     if (m < 0) throw FATALERROR("Cannot locate photon packet interaction point");
 
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (useGpuPhotonCycle && _hasGpuDustSectionTables
+        && (_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+    {
+        double albedo = 0.;
+        vector<double> weights;
+        if (GpuAcceleration::scatteringPropertiesFromTables(
+                _state, m, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+                _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt, lambda, albedo, weights))
+            return albedo;
+    }
+
+    if (useGpuPhotonCycle
+        && (_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+    {
+        vector<double> sectionScav(_numMedia);
+        vector<double> sectionExtv(_numMedia);
+        for (int h = 0; h != _numMedia; ++h)
+        {
+            sectionScav[h] = mix(0, h)->sectionSca(lambda);
+            sectionExtv[h] = mix(0, h)->sectionExt(lambda);
+        }
+        double albedo = 0.;
+        vector<double> weights;
+        if (GpuAcceleration::scatteringProperties(_state, m, sectionScav, sectionExtv, albedo, weights)) return albedo;
+    }
+
     double ksca = 0.;
     double kext = 0.;
     for (int h = 0; h != _numMedia; ++h)
@@ -689,6 +833,452 @@ double MediumSystem::albedoForScattering(const PhotonPacket* pp) const
         kext += mix(m, h)->opacityExt(lambda, &mst, pp);
     }
     return kext > 0. ? ksca / kext : 0.;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::albedosForScattering(const vector<PhotonPacket*>& ppv, vector<double>& albedov) const
+{
+    if (ppv.empty() || !GpuAcceleration::isProcessEnabled()) return false;
+
+    vector<int> cellv;
+    vector<double> lambdav;
+    cellv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        int m = pp->interactionCellIndex();
+        if (m < 0) return false;
+        cellv.push_back(m);
+        lambdav.push_back(perceivedWavelengthForScattering(pp));
+    }
+
+    if (_hasGpuDustSectionTables
+        && (_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+    {
+        if (GpuAcceleration::scatteringAlbedosFromTables(
+                _state, cellv, lambdav, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+                _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt,
+                albedov))
+            return true;
+    }
+
+    if (_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia())
+    {
+        double lambda = lambdav.front();
+        for (double value : lambdav)
+            if (value != lambda) return false;
+
+        vector<double> sectionScav(_numMedia);
+        vector<double> sectionExtv(_numMedia);
+        for (int h = 0; h != _numMedia; ++h)
+        {
+            sectionScav[h] = mix(0, h)->sectionSca(lambda);
+            sectionExtv[h] = mix(0, h)->sectionExt(lambda);
+        }
+        if (GpuAcceleration::scatteringAlbedos(_state, cellv, sectionScav, sectionExtv, albedov)) return true;
+    }
+
+    return false;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::forcedPropagationResults(const vector<PhotonPacket*>& ppv,
+                                            const vector<double>& tauinteractv,
+                                            const vector<double>& pathBiasWeightv, vector<int>& cellv,
+                                            vector<double>& distancev, vector<double>& tauAbsv,
+                                            vector<double>& weightv) const
+{
+    if (ppv.empty() || tauinteractv.size() != ppv.size() || pathBiasWeightv.size() != ppv.size()
+        || !GpuAcceleration::isProcessEnabled())
+        return false;
+
+    vector<const SpatialGridPath*> pathv;
+    pathv.reserve(ppv.size());
+    for (const PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        pathv.push_back(pp);
+    }
+
+    if (_config->explicitAbsorption())
+        return GpuAcceleration::forcedPropagationResults(pathv, tauinteractv, pathBiasWeightv, true, {}, cellv,
+                                                         distancev, tauAbsv, weightv);
+
+    if (_hasGpuDustSectionTables && !_config->hasMovingMedia()
+        && (_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+    {
+        vector<double> lambdav;
+        lambdav.reserve(ppv.size());
+        for (const PhotonPacket* pp : ppv) lambdav.push_back(pp->wavelength());
+        return GpuAcceleration::forcedPropagationResultsFromTables(
+            pathv, _state, tauinteractv, pathBiasWeightv, lambdav, _gpuDustSectionMedia,
+            _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength,
+            _gpuDustSectionSca, _gpuDustSectionExt, cellv, distancev, tauAbsv, weightv);
+    }
+
+    return false;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::radiationFieldAndForcedPropagationResults(
+    const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+    const vector<int>& wavelengthBinv, int numWavelengths,
+    const vector<double>& tauinteractv, const vector<double>& pathBiasWeightv,
+    vector<int>& binIndexv, vector<double>& Ldsv, vector<int>& cellv,
+    vector<double>& distancev, vector<double>& tauAbsv, vector<double>& weightv,
+    bool primary) const
+{
+    (void)primary;
+    if (ppv.empty() || luminosityv.size() != ppv.size() || wavelengthBinv.size() != ppv.size()
+        || tauinteractv.size() != ppv.size() || pathBiasWeightv.size() != ppv.size()
+        || numWavelengths <= 0 || !GpuAcceleration::isProcessEnabled() || _config->explicitAbsorption()
+        || !_hasGpuDustSectionTables || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    vector<const SpatialGridPath*> pathv;
+    vector<double> lambdav;
+    pathv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (const PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        pathv.push_back(pp);
+        lambdav.push_back(pp->wavelength());
+    }
+
+	    return GpuAcceleration::radiationFieldSumsAndForcedPropagationResultsFromTables(
+	        pathv, _state, luminosityv, wavelengthBinv, numWavelengths, tauinteractv, pathBiasWeightv, lambdav,
+	        _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+	        _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt, binIndexv, Ldsv, cellv,
+	        distancev, tauAbsv, weightv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::radiationFieldAndForcedPropagationResultsWithoutPreparedPaths(
+    const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+    const vector<int>& wavelengthBinv, int numWavelengths,
+    const vector<double>& tauinteractv, const vector<double>& pathBiasWeightv,
+    vector<int>& binIndexv, vector<double>& Ldsv, vector<int>& cellv,
+    vector<double>& distancev, vector<double>& tauAbsv, vector<double>& weightv,
+    bool primary) const
+{
+    if (ppv.empty() || luminosityv.size() != ppv.size() || wavelengthBinv.size() != ppv.size()
+        || tauinteractv.size() != ppv.size() || pathBiasWeightv.size() != ppv.size()
+        || numWavelengths <= 0 || !GpuAcceleration::isProcessEnabled() || _config->explicitAbsorption()
+        || !_hasGpuDustSectionTables || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<Position> positionv;
+    vector<Direction> directionv;
+    vector<double> lambdav;
+    positionv.reserve(ppv.size());
+    directionv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (const PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        positionv.push_back(pp->position());
+        directionv.push_back(pp->direction());
+        lambdav.push_back(pp->wavelength());
+    }
+
+    bool directAccumulator = directRadiationFieldAccumulatorEnabled();
+
+	    return GpuAcceleration::voronoiMeshSpatialGridRadiationFieldAndForcedPropagationResultsFromTables(
+	        *voronoiGrid, positionv, directionv, _state, luminosityv, wavelengthBinv, numWavelengths,
+	        tauinteractv, pathBiasWeightv, lambdav, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+	        _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt,
+	        binIndexv, Ldsv, cellv, distancev, tauAbsv, weightv,
+            directAccumulator ? (primary ? static_cast<const void*>(&_rf1) : static_cast<const void*>(&_rf2c))
+                              : nullptr,
+            directAccumulator ? (primary ? _rf1.size() : _rf2c.size()) : 0);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::sampledRadiationFieldAndForcedPropagationResultsWithoutPreparedPaths(
+    const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+    const vector<int>& wavelengthBinv, int numWavelengths,
+    const vector<double>& randomSelectv, const vector<double>& randomSamplev,
+    double pathLengthBias, vector<int>& binIndexv, vector<double>& Ldsv,
+    vector<int>& cellv, vector<double>& distancev, vector<double>& tauAbsv,
+    vector<double>& weightv, bool primary) const
+{
+    if (ppv.empty() || luminosityv.size() != ppv.size() || wavelengthBinv.size() != ppv.size()
+        || randomSelectv.size() != ppv.size() || randomSamplev.size() != ppv.size()
+        || numWavelengths <= 0 || !GpuAcceleration::isProcessEnabled() || _config->explicitAbsorption()
+        || !_hasGpuDustSectionTables || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<Position> positionv;
+    vector<Direction> directionv;
+    vector<double> lambdav;
+    positionv.reserve(ppv.size());
+    directionv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (const PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        positionv.push_back(pp->position());
+        directionv.push_back(pp->direction());
+        lambdav.push_back(pp->wavelength());
+    }
+
+    bool directAccumulator = directRadiationFieldAccumulatorEnabled();
+
+	    return GpuAcceleration::voronoiMeshSpatialGridSampledRadiationFieldAndForcedPropagationResultsFromTables(
+	        *voronoiGrid, positionv, directionv, _state, luminosityv, wavelengthBinv, numWavelengths,
+	        randomSelectv, randomSamplev, pathLengthBias, lambdav, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+	        _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt,
+	        binIndexv, Ldsv, cellv, distancev, tauAbsv, weightv,
+            directAccumulator ? (primary ? static_cast<const void*>(&_rf1) : static_cast<const void*>(&_rf2c))
+                              : nullptr,
+            directAccumulator ? (primary ? _rf1.size() : _rf2c.size()) : 0);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::sampledRadiationFieldForcedPropagationAndHenyeyGreensteinScatteringResultsWithoutPreparedPaths(
+    const vector<PhotonPacket*>& ppv, const vector<double>& luminosityv,
+    const vector<int>& wavelengthBinv, int numWavelengths,
+    const vector<double>& randomSelectv, const vector<double>& randomSamplev,
+    double pathLengthBias, const vector<double>& scatterRandomCosthetav,
+    const vector<double>& scatterRandomPhiv, vector<int>& binIndexv,
+    vector<double>& Ldsv, vector<int>& cellv, vector<double>& distancev,
+    vector<double>& tauAbsv, vector<double>& weightv, vector<Direction>& scatterDirectionv,
+    bool primary) const
+{
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty()
+        || luminosityv.size() != ppv.size() || wavelengthBinv.size() != ppv.size()
+        || randomSelectv.size() != ppv.size() || randomSamplev.size() != ppv.size()
+        || scatterRandomCosthetav.size() != ppv.size() || scatterRandomPhiv.size() != ppv.size()
+        || numWavelengths <= 0 || !GpuAcceleration::isProcessEnabled() || _config->explicitAbsorption())
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<Position> positionv;
+    vector<Direction> directionv;
+    vector<double> lambdav;
+    positionv.reserve(ppv.size());
+    directionv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (const PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        positionv.push_back(pp->position());
+        directionv.push_back(pp->direction());
+        lambdav.push_back(pp->wavelength());
+    }
+
+    vector<double> scatterDirectionFlatv;
+    bool directAccumulator = directRadiationFieldAccumulatorEnabled();
+    if (!GpuAcceleration::
+            voronoiMeshSpatialGridSampledRadiationFieldForcedPropagationAndHenyeyGreensteinScatteringResultsFromTables(
+                *voronoiGrid, positionv, directionv, _state, luminosityv, wavelengthBinv, numWavelengths,
+                randomSelectv, randomSamplev, pathLengthBias, scatterRandomCosthetav, scatterRandomPhiv,
+                _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm,
+                lambdav, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+                _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt, binIndexv, Ldsv, cellv,
+                distancev, tauAbsv, weightv, scatterDirectionFlatv,
+                directAccumulator ? (primary ? static_cast<const void*>(&_rf1) : static_cast<const void*>(&_rf2c))
+                                  : nullptr,
+                directAccumulator ? (primary ? _rf1.size() : _rf2c.size()) : 0)
+        || scatterDirectionFlatv.size() != 3 * ppv.size())
+        return false;
+
+    scatterDirectionv.clear();
+    scatterDirectionv.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+        scatterDirectionv.emplace_back(scatterDirectionFlatv[3 * i], scatterDirectionFlatv[3 * i + 1],
+                                       scatterDirectionFlatv[3 * i + 2], false);
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::observedExtinctionOpticalDepths(const vector<PhotonPacket*>& ppv,
+                                                   const vector<double>& distancev,
+                                                   vector<double>& tauv) const
+{
+    if (ppv.empty() || distancev.size() != ppv.size() || !_hasGpuDustSectionTables
+        || !GpuAcceleration::isProcessEnabled() || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    tauv.assign(ppv.size(), std::numeric_limits<double>::infinity());
+    vector<const SpatialGridPath*> observerPathv;
+    vector<double> lambdav;
+    vector<double> maxDistancev;
+    vector<size_t> indexv;
+    observerPathv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    maxDistancev.reserve(ppv.size());
+    indexv.reserve(ppv.size());
+
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        PhotonPacket* pp = ppv[i];
+        if (!pp) return false;
+        if (pp->luminosity() <= 0.) continue;
+        observerPathv.push_back(pp);
+        lambdav.push_back(pp->wavelength());
+        maxDistancev.push_back(distancev[i]);
+        indexv.push_back(i);
+    }
+
+    if (observerPathv.empty()) return true;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    vector<double> compactTauv;
+    if (voronoiGrid && GpuAcceleration::getVoronoiMeshSpatialGridExtinctionOpticalDepthsFromTables(
+                           *voronoiGrid, observerPathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+                           _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionExt,
+                           lambdav, maxDistancev, compactTauv)
+        && compactTauv.size() == observerPathv.size())
+    {
+        for (size_t p = 0; p != compactTauv.size(); ++p) tauv[indexv[p]] = compactTauv[p];
+        return true;
+    }
+
+    vector<SpatialGridPath> pathStorage;
+    vector<SpatialGridPath*> pathv;
+    pathStorage.reserve(observerPathv.size());
+    pathv.reserve(observerPathv.size());
+    for (size_t p = 0; p != observerPathv.size(); ++p)
+    {
+        pathStorage.push_back(limitedPathForDistance(_grid, observerPathv[p], maxDistancev[p]));
+        pathv.push_back(&pathStorage.back());
+    }
+
+    if (!GpuAcceleration::setExtinctionOpticalDepthsFromTables(
+            pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+            _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav))
+        return false;
+
+    for (size_t p = 0; p != pathv.size(); ++p) tauv[indexv[p]] = pathv[p]->totalOpticalDepth();
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::observedExtinctionOpticalDepths(const vector<Position>& positionv,
+                                                   const vector<Direction>& directionv,
+                                                   const vector<double>& lambdav,
+                                                   const vector<double>& distancev,
+                                                   vector<double>& tauv) const
+{
+    if (positionv.empty() || directionv.size() != positionv.size() || lambdav.size() != positionv.size()
+        || distancev.size() != positionv.size() || !_hasGpuDustSectionTables || !GpuAcceleration::isProcessEnabled()
+        || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (voronoiGrid && GpuAcceleration::getVoronoiMeshSpatialGridExtinctionOpticalDepthsFromTables(
+                           *voronoiGrid, positionv, directionv, _state, _gpuDustSectionMedia,
+                           _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength,
+                           _gpuDustSectionExt, lambdav, distancev, tauv)
+        && tauv.size() == positionv.size())
+        return true;
+
+    vector<SpatialGridPath> pathStorage;
+    vector<SpatialGridPath*> pathv;
+    pathStorage.reserve(positionv.size());
+    pathv.reserve(positionv.size());
+    for (size_t p = 0; p != positionv.size(); ++p)
+    {
+        pathStorage.emplace_back(positionv[p], directionv[p]);
+        pathv.push_back(&pathStorage.back());
+    }
+
+    for (size_t p = 0; p != pathStorage.size(); ++p)
+        pathStorage[p] = limitedPathForDistance(_grid, &pathStorage[p], distancev[p]);
+
+    if (!GpuAcceleration::setExtinctionOpticalDepthsFromTables(
+            pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+            _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav))
+        return false;
+
+    tauv.assign(pathv.size(), 0.);
+    for (size_t p = 0; p != pathv.size(); ++p) tauv[p] = pathv[p]->totalOpticalDepth();
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::observedExtinctionOpticalDepths(const vector<Position>& positionv,
+                                                   const Direction& direction,
+                                                   const vector<double>& lambdav,
+                                                   const vector<double>& distancev,
+                                                   vector<double>& tauv) const
+{
+    if (positionv.empty() || lambdav.size() != positionv.size() || distancev.size() != positionv.size()
+        || !_hasGpuDustSectionTables || !GpuAcceleration::isProcessEnabled() || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (voronoiGrid && GpuAcceleration::getVoronoiMeshSpatialGridExtinctionOpticalDepthsFromTables(
+                           *voronoiGrid, positionv, direction, _state, _gpuDustSectionMedia,
+                           _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength,
+                           _gpuDustSectionExt, lambdav, distancev, tauv)
+        && tauv.size() == positionv.size())
+        return true;
+
+    vector<Direction> directionv(positionv.size(), direction);
+    return observedExtinctionOpticalDepths(positionv, directionv, lambdav, distancev, tauv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::observedFrameBandAccumulate(
+    const vector<Position>& positionv, const vector<double>& lambdav, const vector<double>& luminosityv,
+    Direction bfkobs, const vector<double>& distancev, const void* accumulatorKey,
+    size_t numAccumulatorValues, double costheta, double sintheta, double cosphi, double sinphi,
+    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
+    double ypmin, double ypsiz, double redshift, size_t numPixelsInFrame, const vector<int>& bandOffsetv,
+    const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
+    const vector<double>& bandWidthv) const
+{
+    if (positionv.empty() || lambdav.size() != positionv.size() || luminosityv.size() != positionv.size()
+        || distancev.size() != positionv.size() || !_hasGpuDustSectionTables || !GpuAcceleration::isProcessEnabled()
+        || _config->hasMovingMedia()
+        || !(_config->hasSingleConstantSectionMedium() || _config->hasMultipleConstantSectionMedia()))
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<double> inputDirectionv(3 * positionv.size(), 0.);
+    for (size_t p = 0; p != positionv.size(); ++p) inputDirectionv[3 * p + 2] = 1.;
+    vector<double> zeroAsymmparv(_gpuDustSectionLookupWavelength.size(), 0.);
+
+    bool ok = GpuAcceleration::getVoronoiMeshSpatialGridHenyeyGreensteinScatteringFrameBandAccumulateFromTables(
+        *voronoiGrid, positionv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+        _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav,
+        distancev, inputDirectionv, luminosityv, bfkobs, _gpuDustSectionLookupBegin.front(),
+        _gpuDustSectionLookupCount.front(), zeroAsymmparv, accumulatorKey, numAccumulatorValues,
+        costheta, sintheta, cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz,
+        ypmin, ypsiz, redshift, numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv,
+        bandWidthv);
+    if (!ok) throw FATALERROR("GPU observed frame-band accumulator failed: " + GpuAcceleration::status());
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -708,6 +1298,49 @@ bool MediumSystem::weightsForScattering(ShortArray& wv, double lambda, const Pho
     // locate the cell hosting the scattering event
     int m = pp->interactionCellIndex();
 
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (useGpuPhotonCycle && _hasGpuDustSectionTables && _config->hasMultipleConstantSectionMedia())
+    {
+        double albedo = 0.;
+        vector<double> weights;
+        if (GpuAcceleration::scatteringPropertiesFromTables(
+                _state, m, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+                _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt, lambda, albedo, weights))
+        {
+            bool hasScattering = false;
+            for (int h = 0; h != _numMedia; ++h)
+            {
+                wv[h] = weights[h];
+                hasScattering |= wv[h] > 0.;
+            }
+            return hasScattering;
+        }
+    }
+
+    if (useGpuPhotonCycle && _config->hasMultipleConstantSectionMedia())
+    {
+        vector<double> sectionScav(_numMedia);
+        vector<double> sectionExtv(_numMedia);
+        for (int h = 0; h != _numMedia; ++h)
+        {
+            sectionScav[h] = mix(0, h)->sectionSca(lambda);
+            sectionExtv[h] = mix(0, h)->sectionExt(lambda);
+        }
+        double albedo = 0.;
+        vector<double> weights;
+        if (GpuAcceleration::scatteringProperties(_state, m, sectionScav, sectionExtv, albedo, weights))
+        {
+            bool hasScattering = false;
+            for (int h = 0; h != _numMedia; ++h)
+            {
+                wv[h] = weights[h];
+                hasScattering |= wv[h] > 0.;
+            }
+            return hasScattering;
+        }
+    }
+
     // calculate the weights and their sum
     double sum = 0.;
     for (int h = 0; h != _numMedia; ++h)
@@ -726,6 +1359,185 @@ bool MediumSystem::weightsForScattering(ShortArray& wv, double lambda, const Pho
 
     // none of the media scatter
     return false;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::supportsSingleHenyeyGreensteinScatteringPeelOff() const
+{
+    return _hasGpuSingleHenyeyGreensteinTable && !_config->hasMovingMedia() && !_config->hasPolarization()
+           && _config->hasSingleConstantSectionMedium();
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::henyeyGreensteinScatteringLuminosities(const vector<PhotonPacket*>& ppv,
+                                                          const vector<double>& lambdav,
+                                                          Direction bfkobs,
+                                                          vector<double>& luminosityv) const
+{
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty() || lambdav.size() != ppv.size())
+        return false;
+
+    vector<double> inputDirectionv;
+    vector<double> packetLuminosityv;
+    inputDirectionv.reserve(3 * ppv.size());
+    packetLuminosityv.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        const PhotonPacket* pp = ppv[i];
+        if (!pp) return false;
+        double kx, ky, kz;
+        pp->direction().cartesian(kx, ky, kz);
+        inputDirectionv.push_back(kx);
+        inputDirectionv.push_back(ky);
+        inputDirectionv.push_back(kz);
+        packetLuminosityv.push_back(pp->perceivedLuminosity(lambdav[i]));
+    }
+
+    return GpuAcceleration::henyeyGreensteinScatteringLuminosities(
+        inputDirectionv, packetLuminosityv, lambdav, bfkobs, _gpuDustSectionLookupBegin.front(),
+        _gpuDustSectionLookupCount.front(), _gpuDustSectionLookupWavelength, _gpuDustSectionAsymm, luminosityv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::henyeyGreensteinScatteringObservedLuminosities(const vector<PhotonPacket*>& ppv,
+                                                                  const vector<Position>& positionv,
+                                                                  const vector<double>& lambdav,
+                                                                  Direction bfkobs,
+                                                                  const vector<double>& distancev,
+                                                                  vector<double>& luminosityv) const
+{
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty() || positionv.size() != ppv.size()
+        || lambdav.size() != ppv.size() || distancev.size() != ppv.size() || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<double> inputDirectionv;
+    vector<double> packetLuminosityv;
+    vector<SpatialGridPath> pathStorage;
+    vector<const SpatialGridPath*> pathv;
+    inputDirectionv.reserve(3 * ppv.size());
+    packetLuminosityv.reserve(ppv.size());
+    pathStorage.reserve(ppv.size());
+    pathv.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        const PhotonPacket* pp = ppv[i];
+        if (!pp) return false;
+        double kx, ky, kz;
+        pp->direction().cartesian(kx, ky, kz);
+        inputDirectionv.push_back(kx);
+        inputDirectionv.push_back(ky);
+        inputDirectionv.push_back(kz);
+        packetLuminosityv.push_back(pp->perceivedLuminosity(lambdav[i]));
+        pathStorage.emplace_back(positionv[i], bfkobs);
+        pathv.push_back(&pathStorage.back());
+    }
+
+    return GpuAcceleration::getVoronoiMeshSpatialGridHenyeyGreensteinScatteringObservedLuminositiesFromTables(
+        *voronoiGrid, pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav, distancev, inputDirectionv, packetLuminosityv,
+        bfkobs, _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm,
+        luminosityv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::henyeyGreensteinScatteringFrameBandAccumulate(
+    const vector<PhotonPacket*>& ppv, const vector<Position>& positionv, const vector<double>& lambdav,
+    Direction bfkobs, const vector<double>& distancev, const void* accumulatorKey,
+    size_t numAccumulatorValues, double costheta, double sintheta, double cosphi, double sinphi,
+    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
+    double ypmin, double ypsiz, double redshift, size_t numPixelsInFrame, const vector<int>& bandOffsetv,
+    const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
+    const vector<double>& bandWidthv) const
+{
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty() || positionv.size() != ppv.size()
+        || lambdav.size() != ppv.size() || distancev.size() != ppv.size() || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<double> inputDirectionv;
+    vector<double> packetLuminosityv;
+    inputDirectionv.reserve(3 * ppv.size());
+    packetLuminosityv.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        const PhotonPacket* pp = ppv[i];
+        if (!pp) return false;
+        double kx, ky, kz;
+        pp->direction().cartesian(kx, ky, kz);
+        inputDirectionv.push_back(kx);
+        inputDirectionv.push_back(ky);
+        inputDirectionv.push_back(kz);
+        packetLuminosityv.push_back(pp->perceivedLuminosity(lambdav[i]));
+    }
+
+    bool ok = GpuAcceleration::getVoronoiMeshSpatialGridHenyeyGreensteinScatteringFrameBandAccumulateFromTables(
+        *voronoiGrid, positionv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+        _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav,
+        distancev, inputDirectionv, packetLuminosityv, bfkobs, _gpuDustSectionLookupBegin.front(),
+        _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm, accumulatorKey, numAccumulatorValues,
+        costheta, sintheta, cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz,
+        ypmin, ypsiz, redshift, numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv,
+        bandWidthv);
+    if (!ok)
+        throw FATALERROR("GPU Henyey-Greenstein frame-band accumulator failed: " + GpuAcceleration::status());
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::simulateScatteringBatch(Random* random, const vector<PhotonPacket*>& ppv) const
+{
+    if (!random || !supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty() || !GpuAcceleration::isProcessEnabled())
+        return false;
+
+    vector<double> inputDirectionv;
+    vector<double> lambdav;
+    vector<double> randomCosthetav;
+    vector<double> randomPhiv;
+    inputDirectionv.reserve(3 * ppv.size());
+    lambdav.reserve(ppv.size());
+    randomCosthetav.reserve(ppv.size());
+    randomPhiv.reserve(ppv.size());
+
+    for (PhotonPacket* pp : ppv)
+    {
+        if (!pp || pp->interactionCellIndex() < 0) return false;
+
+        double kx, ky, kz;
+        pp->direction().cartesian(kx, ky, kz);
+        inputDirectionv.push_back(kx);
+        inputDirectionv.push_back(ky);
+        inputDirectionv.push_back(kz);
+        lambdav.push_back(perceivedWavelengthForScattering(pp));
+        randomCosthetav.push_back(random->uniform());
+        randomPhiv.push_back(random->uniform());
+    }
+
+    vector<double> outputDirectionv;
+    if (!GpuAcceleration::henyeyGreensteinScatteringDirections(
+            inputDirectionv, lambdav, randomCosthetav, randomPhiv, _gpuDustSectionLookupBegin.front(),
+            _gpuDustSectionLookupCount.front(), _gpuDustSectionLookupWavelength, _gpuDustSectionAsymm,
+            outputDirectionv)
+        || outputDirectionv.size() != 3 * ppv.size())
+        return false;
+
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        PhotonPacket* pp = ppv[i];
+        pp->setScatteringComponent(0);
+        pp->scatter(Direction(outputDirectionv[3 * i], outputDirectionv[3 * i + 1], outputDirectionv[3 * i + 2], false),
+                    Vec(), lambdav[i]);
+    }
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -804,15 +1616,34 @@ void MediumSystem::simulateScattering(Random* random, PhotonPacket* pp) const
     int h = 0;
     if (_numMedia > 1)
     {
-        // build the cumulative distribution corresponding to the scattering opacities
-        Array Xv;
-        NR::cdf(Xv, _numMedia, [this, lambda, pp, m](int h) {
-            MaterialState mst(_state, m, h);
-            return mix(m, h)->opacitySca(lambda, &mst, pp);
-        });
+        ShortArray wv;
+        if (weightsForScattering(wv, lambda, pp))
+        {
+            double X = random->uniform();
+            double cumulative = 0.;
+            h = _numMedia - 1;
+            for (int i = 0; i != _numMedia; ++i)
+            {
+                cumulative += wv[i];
+                if (X < cumulative)
+                {
+                    h = i;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            // build the cumulative distribution corresponding to the scattering opacities
+            Array Xv;
+            NR::cdf(Xv, _numMedia, [this, lambda, pp, m](int h) {
+                MaterialState mst(_state, m, h);
+                return mix(m, h)->opacitySca(lambda, &mst, pp);
+            });
 
-        // randomly select an index
-        h = NR::locateClip(Xv, random->uniform());
+            // randomly select an index
+            h = NR::locateClip(Xv, random->uniform());
+        }
     }
 
     // actually perform the scattering event for this cell and medium component
@@ -841,6 +1672,112 @@ namespace
         t_generator->start(path);
         return t_generator.get();
     }
+
+    bool setPathOnGpu(SpatialGrid* grid, SpatialGridPath* path, double maxDistance)
+    {
+        if (!GpuAcceleration::isPathGenerationEnabled()) return false;
+
+        const auto* cartesianGrid = dynamic_cast<const CartesianSpatialGrid*>(grid);
+        if (cartesianGrid) return GpuAcceleration::setCartesianSpatialGridPath(*cartesianGrid, path, maxDistance);
+
+        const auto* treeGrid = dynamic_cast<const TreeSpatialGrid*>(grid);
+        if (treeGrid) return GpuAcceleration::setTreeSpatialGridPath(*treeGrid, path, maxDistance);
+
+        const auto* adaptiveMeshGrid = dynamic_cast<const AdaptiveMeshSpatialGrid*>(grid);
+        if (adaptiveMeshGrid)
+            return GpuAcceleration::setAdaptiveMeshSpatialGridPath(*adaptiveMeshGrid, path, maxDistance);
+
+        const auto* cylinder2DGrid = dynamic_cast<const Cylinder2DSpatialGrid*>(grid);
+        if (cylinder2DGrid) return GpuAcceleration::setCylinder2DSpatialGridPath(*cylinder2DGrid, path, maxDistance);
+
+        const auto* cylinder3DGrid = dynamic_cast<const Cylinder3DSpatialGrid*>(grid);
+        if (cylinder3DGrid) return GpuAcceleration::setCylinder3DSpatialGridPath(*cylinder3DGrid, path, maxDistance);
+
+        const auto* tetraMeshGrid = dynamic_cast<const TetraMeshSpatialGrid*>(grid);
+        if (tetraMeshGrid) return GpuAcceleration::setTetraMeshSpatialGridPath(*tetraMeshGrid, path, maxDistance);
+
+        const auto* voronoiMeshGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(grid);
+        if (voronoiMeshGrid) return GpuAcceleration::setVoronoiMeshSpatialGridPath(*voronoiMeshGrid, path, maxDistance);
+
+        const auto* sphere1DGrid = dynamic_cast<const Sphere1DSpatialGrid*>(grid);
+        if (sphere1DGrid) return GpuAcceleration::setSphere1DSpatialGridPath(*sphere1DGrid, path, maxDistance);
+
+        const auto* sphere2DGrid = dynamic_cast<const Sphere2DSpatialGrid*>(grid);
+        if (sphere2DGrid) return GpuAcceleration::setSphere2DSpatialGridPath(*sphere2DGrid, path, maxDistance);
+
+        const auto* sphere3DGrid = dynamic_cast<const Sphere3DSpatialGrid*>(grid);
+        if (sphere3DGrid) return GpuAcceleration::setSphere3DSpatialGridPath(*sphere3DGrid, path, maxDistance);
+
+        return false;
+    }
+
+    void setCompletePathForTraversal(SpatialGrid* grid, SpatialGridPath* path)
+    {
+        if (setPathOnGpu(grid, path, std::numeric_limits<double>::infinity())) return;
+
+        auto generator = getPathSegmentGenerator(grid, path);
+        path->clear();
+        while (generator->next())
+        {
+            path->addSegment(generator->m(), generator->ds());
+        }
+    }
+
+    bool setCompletePathsForTraversal(SpatialGrid* grid, const vector<PhotonPacket*>& ppv)
+    {
+        if (!environmentFlag("SKIRTGPU_BATCH_VORONOI_PATHS", true) || !GpuAcceleration::isProcessEnabled()
+            || ppv.empty())
+            return false;
+
+        const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(grid);
+        if (!voronoiGrid) return false;
+
+        size_t maxBatchSize = environmentSizeValue("SKIRTGPU_BATCH_VORONOI_PATHS_MAX", 1024);
+        vector<SpatialGridPath*> pathv;
+        pathv.reserve(maxBatchSize);
+
+        for (size_t begin = 0; begin != ppv.size(); begin += maxBatchSize)
+        {
+            size_t end = std::min(begin + maxBatchSize, ppv.size());
+            pathv.clear();
+            for (size_t i = begin; i != end; ++i)
+            {
+                if (!ppv[i]) return false;
+                pathv.push_back(ppv[i]);
+            }
+
+            if (!GpuAcceleration::setVoronoiMeshSpatialGridPaths(*voronoiGrid, pathv,
+                                                                  std::numeric_limits<double>::infinity()))
+                return false;
+        }
+        return true;
+    }
+
+    // This helper builds the same limited peel-off path used by getExtinctionOpticalDepth():
+    // include every segment whose entry boundary lies before the requested distance.
+    SpatialGridPath limitedPathForDistance(SpatialGrid* grid, const SpatialGridPath* source, double distance)
+    {
+        SpatialGridPath path(source->position(), source->direction());
+        if (setPathOnGpu(grid, &path, distance)) return path;
+
+        auto generator = getPathSegmentGenerator(grid, source);
+        double s = 0.;
+        while (generator->next())
+        {
+            double ds = generator->ds();
+            path.addSegment(generator->m(), ds);
+            s += ds;
+            if (s > distance) break;
+        }
+        return path;
+    }
+
+    SpatialGridPath completePathForTraversal(SpatialGrid* grid, const SpatialGridPath* source)
+    {
+        SpatialGridPath path(source->position(), source->direction());
+        setCompletePathForTraversal(grid, &path);
+        return path;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -848,20 +1785,24 @@ namespace
 void MediumSystem::setExtinctionOpticalDepths(PhotonPacket* pp) const
 {
     // determine and store the path segments in the photon packet
-    auto generator = getPathSegmentGenerator(_grid, pp);
-    pp->clear();
-    while (generator->next())
-    {
-        pp->addSegment(generator->m(), generator->ds());
-    }
+    setCompletePathForTraversal(_grid, pp);
 
     // calculate the cumulative optical depth and store it in the photon packet for each path segment
     double tau = 0.;
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (useGpuPhotonCycle && _hasGpuDustSectionTables
+        && GpuAcceleration::setExtinctionOpticalDepthsFromTables(
+               pp, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+               _gpuDustSectionLookupWavelength, _gpuDustSectionExt, pp->wavelength()))
+        return;
 
     // single medium, spatially constant cross sections
     if (_config->hasSingleConstantSectionMedium())
     {
         double section = mix(0, 0)->sectionExt(pp->wavelength());
+        vector<double> sectionv{section};
+        if (useGpuPhotonCycle && GpuAcceleration::setExtinctionOpticalDepths(pp, _state, sectionv)) return;
         for (auto& segment : pp->segments())
         {
             if (segment.m() >= 0) tau += section * _state.numberDensity(segment.m(), 0) * segment.ds();
@@ -874,6 +1815,9 @@ void MediumSystem::setExtinctionOpticalDepths(PhotonPacket* pp) const
     {
         ShortArray sectionv(_numMedia);
         for (int h = 0; h != _numMedia; ++h) sectionv[h] = mix(0, h)->sectionExt(pp->wavelength());
+        vector<double> sections(_numMedia);
+        for (int h = 0; h != _numMedia; ++h) sections[h] = sectionv[h];
+        if (useGpuPhotonCycle && GpuAcceleration::setExtinctionOpticalDepths(pp, _state, sections)) return;
         for (auto& segment : pp->segments())
         {
             if (segment.m() >= 0)
@@ -901,25 +1845,65 @@ void MediumSystem::setExtinctionOpticalDepths(PhotonPacket* pp) const
 
 ////////////////////////////////////////////////////////////////////
 
+bool MediumSystem::setExtinctionOpticalDepths(const vector<PhotonPacket*>& ppv) const
+{
+    if (ppv.empty() || !_hasGpuDustSectionTables || !GpuAcceleration::isProcessEnabled()) return false;
+
+    vector<SpatialGridPath*> pathv;
+    vector<double> lambdav;
+    pathv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        pathv.push_back(pp);
+        lambdav.push_back(pp->wavelength());
+    }
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (voronoiGrid && environmentFlag("SKIRTGPU_BATCH_VORONOI_PATHS", true)
+        && GpuAcceleration::setVoronoiMeshSpatialGridExtinctionOpticalDepthsFromTables(
+               *voronoiGrid, pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+               _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav))
+        return true;
+
+    bool haveBatchedPaths = setCompletePathsForTraversal(_grid, ppv);
+    if (!haveBatchedPaths)
+        for (PhotonPacket* pp : ppv) setCompletePathForTraversal(_grid, pp);
+
+    return GpuAcceleration::setExtinctionOpticalDepthsFromTables(
+        pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav);
+}
+
+////////////////////////////////////////////////////////////////////
+
 void MediumSystem::setScatteringAndAbsorptionOpticalDepths(PhotonPacket* pp) const
 {
     // determine and store the path segments in the photon packet
-    auto generator = getPathSegmentGenerator(_grid, pp);
-    pp->clear();
-    while (generator->next())
-    {
-        pp->addSegment(generator->m(), generator->ds());
-    }
+    setCompletePathForTraversal(_grid, pp);
 
     // calculate the cumulative optical depths and store them in the photon packet for each path segment
     double tauSca = 0.;
     double tauAbs = 0.;
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (useGpuPhotonCycle && _hasGpuDustSectionTables
+        && GpuAcceleration::setScatteringAndAbsorptionOpticalDepthsFromTables(
+               pp, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+               _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionAbs, pp->wavelength()))
+        return;
 
     // single medium, spatially constant cross sections
     if (_config->hasSingleConstantSectionMedium())
     {
         double sectionSca = mix(0, 0)->sectionSca(pp->wavelength());
         double sectionAbs = mix(0, 0)->sectionAbs(pp->wavelength());
+        vector<double> sectionScav{sectionSca};
+        vector<double> sectionAbsv{sectionAbs};
+        if (useGpuPhotonCycle
+            && GpuAcceleration::setScatteringAndAbsorptionOpticalDepths(pp, _state, sectionScav, sectionAbsv))
+            return;
         for (auto& segment : pp->segments())
         {
             if (segment.m() >= 0)
@@ -942,6 +1926,16 @@ void MediumSystem::setScatteringAndAbsorptionOpticalDepths(PhotonPacket* pp) con
             sectionScav[h] = mix(0, h)->sectionSca(pp->wavelength());
             sectionAbsv[h] = mix(0, h)->sectionAbs(pp->wavelength());
         }
+        vector<double> scaSections(_numMedia);
+        vector<double> absSections(_numMedia);
+        for (int h = 0; h != _numMedia; ++h)
+        {
+            scaSections[h] = sectionScav[h];
+            absSections[h] = sectionAbsv[h];
+        }
+        if (useGpuPhotonCycle
+            && GpuAcceleration::setScatteringAndAbsorptionOpticalDepths(pp, _state, scaSections, absSections))
+            return;
         for (auto& segment : pp->segments())
         {
             if (segment.m() >= 0)
@@ -974,6 +1968,40 @@ void MediumSystem::setScatteringAndAbsorptionOpticalDepths(PhotonPacket* pp) con
 
 ////////////////////////////////////////////////////////////////////
 
+bool MediumSystem::setScatteringAndAbsorptionOpticalDepths(const vector<PhotonPacket*>& ppv) const
+{
+    if (ppv.empty() || !_hasGpuDustSectionTables || !GpuAcceleration::isProcessEnabled()) return false;
+
+    vector<SpatialGridPath*> pathv;
+    vector<double> lambdav;
+    pathv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    for (PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        pathv.push_back(pp);
+        lambdav.push_back(pp->wavelength());
+    }
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (voronoiGrid && environmentFlag("SKIRTGPU_BATCH_VORONOI_PATHS", true)
+        && GpuAcceleration::setVoronoiMeshSpatialGridScatteringAndAbsorptionOpticalDepthsFromTables(
+               *voronoiGrid, pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
+               _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionAbs,
+               lambdav))
+        return true;
+
+    bool haveBatchedPaths = setCompletePathsForTraversal(_grid, ppv);
+    if (!haveBatchedPaths)
+        for (PhotonPacket* pp : ppv) setCompletePathForTraversal(_grid, pp);
+
+    return GpuAcceleration::setScatteringAndAbsorptionOpticalDepthsFromTables(
+        pathv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionAbs, lambdav);
+}
+
+////////////////////////////////////////////////////////////////////
+
 bool MediumSystem::setInteractionPointUsingExtinction(PhotonPacket* pp, double tauinteract) const
 {
     auto generator = getPathSegmentGenerator(_grid, pp);
@@ -982,10 +2010,44 @@ bool MediumSystem::setInteractionPointUsingExtinction(PhotonPacket* pp, double t
 
     // loop over the segments of the path until the interaction optical depth is reached or the path ends
 
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (_hasGpuDustSectionTables && useGpuPhotonCycle)
+    {
+        SpatialGridPath path = completePathForTraversal(_grid, pp);
+        bool found = false;
+        int m = -1;
+        double interactionDistance = 0.;
+        if (GpuAcceleration::findInteractionPointUsingExtinctionFromTables(
+                &path, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+                _gpuDustSectionLookupWavelength, _gpuDustSectionExt, pp->wavelength(), tauinteract, found, m,
+                interactionDistance))
+        {
+            if (found) pp->setInteractionPoint(m, interactionDistance);
+            return found;
+        }
+        generator = getPathSegmentGenerator(_grid, pp);
+    }
+
     // --> single medium, spatially constant cross sections
     if (_config->hasSingleConstantSectionMedium())
     {
         double section = mix(0, 0)->sectionExt(pp->wavelength());
+        if (useGpuPhotonCycle)
+        {
+            SpatialGridPath path = completePathForTraversal(_grid, pp);
+            vector<double> sectionv{section};
+            bool found = false;
+            int m = -1;
+            double interactionDistance = 0.;
+            if (GpuAcceleration::findInteractionPointUsingExtinction(&path, _state, sectionv, tauinteract, found, m,
+                                                                      interactionDistance))
+            {
+                if (found) pp->setInteractionPoint(m, interactionDistance);
+                return found;
+            }
+            generator = getPathSegmentGenerator(_grid, pp);
+        }
         while (generator->next())
         {
             // remember the cumulative optical depth and distance at the start of this segment
@@ -1013,6 +2075,22 @@ bool MediumSystem::setInteractionPointUsingExtinction(PhotonPacket* pp, double t
     {
         ShortArray sectionv(_numMedia);
         for (int h = 0; h != _numMedia; ++h) sectionv[h] = mix(0, h)->sectionExt(pp->wavelength());
+        if (useGpuPhotonCycle)
+        {
+            SpatialGridPath path = completePathForTraversal(_grid, pp);
+            vector<double> sections(_numMedia);
+            for (int h = 0; h != _numMedia; ++h) sections[h] = sectionv[h];
+            bool found = false;
+            int m = -1;
+            double interactionDistance = 0.;
+            if (GpuAcceleration::findInteractionPointUsingExtinction(&path, _state, sections, tauinteract, found, m,
+                                                                      interactionDistance))
+            {
+                if (found) pp->setInteractionPoint(m, interactionDistance);
+                return found;
+            }
+            generator = getPathSegmentGenerator(_grid, pp);
+        }
         while (generator->next())
         {
             // remember the cumulative optical depth and distance at the start of this segment
@@ -1080,11 +2158,48 @@ bool MediumSystem::setInteractionPointUsingScatteringAndAbsorption(PhotonPacket*
 
     // loop over the segments of the path until the interaction optical depth is reached or the path ends
 
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (_hasGpuDustSectionTables && useGpuPhotonCycle)
+    {
+        SpatialGridPath path = completePathForTraversal(_grid, pp);
+        bool found = false;
+        int m = -1;
+        double interactionDistance = 0.;
+        double tableTauAbs = 0.;
+        if (GpuAcceleration::findInteractionPointUsingScatteringAndAbsorptionFromTables(
+                &path, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+                _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionAbs, pp->wavelength(),
+                tauinteract, found, m, interactionDistance, tableTauAbs))
+        {
+            if (found) pp->setInteractionPoint(m, interactionDistance, tableTauAbs);
+            return found;
+        }
+        generator = getPathSegmentGenerator(_grid, pp);
+    }
+
     // --> single medium, spatially constant cross sections
     if (_config->hasSingleConstantSectionMedium())
     {
         double sectionSca = mix(0, 0)->sectionSca(pp->wavelength());
         double sectionAbs = mix(0, 0)->sectionAbs(pp->wavelength());
+        if (useGpuPhotonCycle)
+        {
+            SpatialGridPath path = completePathForTraversal(_grid, pp);
+            vector<double> sectionScav{sectionSca};
+            vector<double> sectionAbsv{sectionAbs};
+            bool found = false;
+            int m = -1;
+            double interactionDistance = 0.;
+            double tauAbs = 0.;
+            if (GpuAcceleration::findInteractionPointUsingScatteringAndAbsorption(
+                    &path, _state, sectionScav, sectionAbsv, tauinteract, found, m, interactionDistance, tauAbs))
+            {
+                if (found) pp->setInteractionPoint(m, interactionDistance, tauAbs);
+                return found;
+            }
+            generator = getPathSegmentGenerator(_grid, pp);
+        }
         while (generator->next())
         {
             // remember the cumulative scattering optical depth and distance at the start of this segment
@@ -1117,6 +2232,28 @@ bool MediumSystem::setInteractionPointUsingScatteringAndAbsorption(PhotonPacket*
         {
             sectionScav[h] = mix(0, h)->sectionSca(pp->wavelength());
             sectionAbsv[h] = mix(0, h)->sectionAbs(pp->wavelength());
+        }
+        if (useGpuPhotonCycle)
+        {
+            SpatialGridPath path = completePathForTraversal(_grid, pp);
+            vector<double> scaSections(_numMedia);
+            vector<double> absSections(_numMedia);
+            for (int h = 0; h != _numMedia; ++h)
+            {
+                scaSections[h] = sectionScav[h];
+                absSections[h] = sectionAbsv[h];
+            }
+            bool found = false;
+            int m = -1;
+            double interactionDistance = 0.;
+            double tauAbs = 0.;
+            if (GpuAcceleration::findInteractionPointUsingScatteringAndAbsorption(
+                    &path, _state, scaSections, absSections, tauinteract, found, m, interactionDistance, tauAbs))
+            {
+                if (found) pp->setInteractionPoint(m, interactionDistance, tauAbs);
+                return found;
+            }
+            generator = getPathSegmentGenerator(_grid, pp);
         }
         while (generator->next())
         {
@@ -1202,10 +2339,38 @@ double MediumSystem::getExtinctionOpticalDepth(const PhotonPacket* pp, double di
     double tau = 0.;
     double s = 0.;
 
+    bool useGpuPhotonCycle = GpuAcceleration::isSynchronousPhotonCycleEnabled();
+
+    if (_hasGpuDustSectionTables && useGpuPhotonCycle)
+    {
+        SpatialGridPath path = limitedPathForDistance(_grid, pp, distance);
+        if (GpuAcceleration::getExtinctionOpticalDepthFromTables(
+                &path, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+                _gpuDustSectionLookupWavelength, _gpuDustSectionExt, pp->wavelength(), taumax, tau))
+            return tau;
+        tau = 0.;
+    }
+
     // single medium, spatially constant cross sections
     if (_config->hasSingleConstantSectionMedium())
     {
         double section = mix(0, 0)->sectionExt(pp->wavelength());
+        if (useGpuPhotonCycle)
+        {
+            SpatialGridPath path = limitedPathForDistance(_grid, pp, distance);
+            vector<double> sectionv{section};
+            if (GpuAcceleration::getExtinctionOpticalDepth(&path, _state, sectionv, taumax, tau)) return tau;
+            tau = 0.;
+            for (const auto& segment : path.segments())
+            {
+                if (segment.m() >= 0)
+                {
+                    tau += section * _state.numberDensity(segment.m(), 0) * segment.ds();
+                    if (tau >= taumax) return std::numeric_limits<double>::infinity();
+                }
+            }
+            return tau;
+        }
         while (generator->next())
         {
             if (generator->m() >= 0)
@@ -1223,6 +2388,23 @@ double MediumSystem::getExtinctionOpticalDepth(const PhotonPacket* pp, double di
     {
         ShortArray sectionv(_numMedia);
         for (int h = 0; h != _numMedia; ++h) sectionv[h] = mix(0, h)->sectionExt(pp->wavelength());
+        if (useGpuPhotonCycle)
+        {
+            SpatialGridPath path = limitedPathForDistance(_grid, pp, distance);
+            vector<double> sections(_numMedia);
+            for (int h = 0; h != _numMedia; ++h) sections[h] = sectionv[h];
+            if (GpuAcceleration::getExtinctionOpticalDepth(&path, _state, sections, taumax, tau)) return tau;
+            tau = 0.;
+            for (const auto& segment : path.segments())
+            {
+                if (segment.m() >= 0)
+                {
+                    for (int h = 0; h != _numMedia; ++h) tau += sectionv[h] * _state.numberDensity(segment.m(), h) * segment.ds();
+                    if (tau >= taumax) return std::numeric_limits<double>::infinity();
+                }
+            }
+            return tau;
+        }
         while (generator->next())
         {
             double ds = generator->ds();
@@ -1281,10 +2463,13 @@ void MediumSystem::clearRadiationField(bool primary)
     {
         _rf1.setToZero();
         if (_rf2.size()) _rf2.setToZero();
+        GpuAcceleration::clearAccumulatedValues(&_rf1);
+        if (_rf2.size()) GpuAcceleration::clearAccumulatedValues(&_rf2);
     }
     else
     {
         _rf2c.setToZero();
+        GpuAcceleration::clearAccumulatedValues(&_rf2c);
     }
 }
 
@@ -1300,15 +2485,125 @@ void MediumSystem::storeRadiationField(bool primary, int m, int ell, double Lds)
 
 ////////////////////////////////////////////////////////////////////
 
+void MediumSystem::storeRadiationField(bool primary, const vector<int>& binIndexv, const vector<double>& Ldsv)
+{
+    if (binIndexv.size() != Ldsv.size()) return;
+    if (binIndexv.empty()) return;
+
+    Array& table = primary ? _rf1.data() : _rf2c.data();
+    size_t tableSize = table.size();
+    if (environmentFlag("SKIRTGPU_RF_ACCUMULATOR", false) && GpuAcceleration::isProcessEnabled())
+    {
+        if (GpuAcceleration::accumulateValuesByKey(primary ? static_cast<const void*>(&_rf1)
+                                                           : static_cast<const void*>(&_rf2c),
+                                                   tableSize, binIndexv, Ldsv))
+            return;
+        throw FATALERROR("GPU radiation field accumulator update failed: " + GpuAcceleration::status());
+    }
+
+    if (environmentFlag("SKIRTGPU_SERIAL_RF_STORE", false))
+    {
+        std::lock_guard<std::mutex> lock(_radiationFieldBulkStoreMutex);
+        for (size_t i = 0; i != binIndexv.size(); ++i)
+        {
+            int index = binIndexv[i];
+            if (index >= 0 && static_cast<size_t>(index) < tableSize) table[index] += Ldsv[i];
+        }
+        return;
+    }
+
+    for (size_t i = 0; i != binIndexv.size(); ++i)
+    {
+        int index = binIndexv[i];
+        if (index >= 0 && static_cast<size_t>(index) < tableSize) LockFree::add(table[index], Ldsv[i]);
+    }
+}
+
+////////////////////////////////////////////////////////////////////
+
 void MediumSystem::communicateRadiationField(bool primary)
 {
+    bool flushGpuAccumulator = environmentFlag("SKIRTGPU_RF_ACCUMULATOR", false)
+                               || directRadiationFieldAccumulatorEnabled();
     if (primary)
+    {
+        if (flushGpuAccumulator
+            && GpuAcceleration::isProcessEnabled()
+            && !GpuAcceleration::retrieveAndClearAccumulatedValues(&_rf1, begin(_rf1.data()), _rf1.size()))
+            throw FATALERROR("GPU radiation field accumulator flush failed: " + GpuAcceleration::status());
         ProcessManager::sumToAll(_rf1.data());
+    }
     else
     {
+        if (flushGpuAccumulator
+            && GpuAcceleration::isProcessEnabled()
+            && !GpuAcceleration::retrieveAndClearAccumulatedValues(&_rf2c, begin(_rf2c.data()), _rf2c.size()))
+            throw FATALERROR("GPU radiation field accumulator flush failed: " + GpuAcceleration::status());
         ProcessManager::sumToAll(_rf2c.data());
         _rf2 = _rf2c;
     }
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::dustAbsorbedLuminosities(Array& Labs1v, Array& Labs2v) const
+{
+    if (!GpuAcceleration::isProcessEnabled()) return false;
+    if (!_config->hasSingleConstantSectionMedium() && !_config->hasMultipleConstantSectionMedia()) return false;
+    if (!_rf1.size() || !_wavelengthGrid || _dust_hv.empty()) return false;
+
+    int numWavelengths = _wavelengthGrid->numBins();
+    vector<double> sectionAbsv(_dust_hv.size() * static_cast<size_t>(numWavelengths));
+    for (size_t j = 0; j != _dust_hv.size(); ++j)
+    {
+        int h = _dust_hv[j];
+        for (int ell = 0; ell != numWavelengths; ++ell)
+            sectionAbsv[j * static_cast<size_t>(numWavelengths) + ell] =
+                mix(0, h)->sectionAbs(_wavelengthGrid->wavelength(ell));
+    }
+
+    vector<double> labs1;
+    vector<double> labs2;
+    const double* rf1v = begin(_rf1.data());
+    const double* rf2v = _rf2.size() ? begin(_rf2.data()) : nullptr;
+    if (!GpuAcceleration::dustAbsorbedLuminosities(_state, _numCells, numWavelengths, _dust_hv, sectionAbsv, rf1v,
+                                                   rf2v, labs1, labs2))
+        return false;
+
+    Labs1v.resize(_numCells);
+    Labs2v.resize(_numCells);
+    for (int m = 0; m != _numCells; ++m)
+    {
+        Labs1v[m] = labs1[m];
+        Labs2v[m] = labs2[m];
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::totalDustAbsorbedLuminosity(double& Labs1, double& Labs2) const
+{
+    Labs1 = 0.;
+    Labs2 = 0.;
+    if (!GpuAcceleration::isProcessEnabled()) return false;
+    if (!_config->hasSingleConstantSectionMedium() && !_config->hasMultipleConstantSectionMedia()) return false;
+    if (!_rf1.size() || !_wavelengthGrid || _dust_hv.empty()) return false;
+
+    int numWavelengths = _wavelengthGrid->numBins();
+    vector<double> sectionAbsv(_dust_hv.size() * static_cast<size_t>(numWavelengths));
+    for (size_t j = 0; j != _dust_hv.size(); ++j)
+    {
+        int h = _dust_hv[j];
+        for (int ell = 0; ell != numWavelengths; ++ell)
+            sectionAbsv[j * static_cast<size_t>(numWavelengths) + ell] =
+                mix(0, h)->sectionAbs(_wavelengthGrid->wavelength(ell));
+    }
+
+    const double* rf1v = begin(_rf1.data());
+    const double* rf2v = _rf2.size() ? begin(_rf2.data()) : nullptr;
+    return GpuAcceleration::totalDustAbsorbedLuminosity(_state, _numCells, numWavelengths, _dust_hv, sectionAbsv,
+                                                        rf1v, rf2v, Labs1, Labs2);
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -1318,9 +2613,15 @@ std::pair<double, double> MediumSystem::totalDustAbsorbedLuminosity() const
     auto log = find<Log>();
     auto parfac = find<ParallelFactory>();
 
+    double Labs1 = 0.;
+    double Labs2 = 0.;
+    if (totalDustAbsorbedLuminosity(Labs1, Labs2)) return std::make_pair(Labs1, Labs2);
+
     // provide room for results per spatial cell
     Array Labs1v(_numCells);
     Array Labs2v(_numCells);
+
+    if (dustAbsorbedLuminosities(Labs1v, Labs2v)) return std::make_pair(Labs1v.sum(), Labs2v.sum());
 
     // loop over the spatial cells in parallel
     log->info("Calculating dust-absorbed luminosity for " + std::to_string(_numCells) + " cells...");
@@ -1545,6 +2846,7 @@ bool MediumSystem::updateDynamicStateRecipes()
 
     // calculate the new current aggregate state
     _state.calculateAggregate();
+    GpuAcceleration::invalidateMediumState(_state);
 
     // tell all recipes to end the update cycle and collect convergence info
     // !! we should pass aggregate medium state information to the recipes
@@ -1601,6 +2903,7 @@ bool MediumSystem::updateDynamicStateMedia(bool primary)
 
     // calculate the new current aggregate state
     _state.calculateAggregate();
+    GpuAcceleration::invalidateMediumState(_state);
 
     // collect convergence info from the material mixes
     bool converged = true;
@@ -1618,6 +2921,7 @@ bool MediumSystem::updateDynamicStateMedia(bool primary)
 void MediumSystem::beginDynamicMediumStateIteration()
 {
     _state.pushAggregate();
+    GpuAcceleration::invalidateMediumState(_state);
 }
 
 ////////////////////////////////////////////////////////////////////

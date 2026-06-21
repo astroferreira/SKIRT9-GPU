@@ -494,6 +494,12 @@ private:
         provides a placeholder peel off photon packet for use by the function. */
     void peelOffEmission(const PhotonPacket* pp, PhotonPacket* ppp);
 
+    /** This function attempts to perform emission peel-off for a batch of photon packets using a
+        GPU batch for the observer-direction extinction optical depths. It returns false if the
+        current instrument or medium configuration is unsupported so callers can fall back to
+        peelOffEmission() for each packet. */
+    bool peelOffEmissionBatch(const vector<PhotonPacket*>& ppv);
+
     /** This function stores the contribution of the specified photon packet to the radiation field
         in the cells crossed by the packet's path. The function assumes that both the geometric and
         optical depth information for the photon packet's path have been set; if this is not the
@@ -528,6 +534,26 @@ private:
         \f$J_\lambda\f$ is expressed as an amount of energy per unit of time, per unit of area, per
         unit of wavelength, and per unit of solid angle. */
     void storeRadiationField(bool primary, const PhotonPacket* pp);
+
+    /** This function stores radiation-field contributions for a batch of photon packets whose
+        cumulative optical-depth paths have already been prepared. It uses a GPU batch for the
+        luminosity-distance contribution calculation when the perceived wavelength is constant
+        along each path, and returns false if callers should use storeRadiationField() per packet. */
+    bool storeRadiationFieldBatch(bool primary, const vector<PhotonPacket*>& ppv);
+
+    /** This function stores radiation-field contributions and performs the forced propagation
+        step for a batch of photon packets in one combined GPU runtime pass over the prepared
+        cumulative optical-depth paths. It preserves the scalar path-length-bias random sampling
+        and returns false if the combined path is unavailable. */
+    bool storeRadiationFieldAndSimulateForcedPropagationBatch(bool primary, const vector<PhotonPacket*>& ppv);
+
+    /** This function stores radiation-field contributions and performs the forced propagation step
+        for a batch of photon packets in one GPU runtime pass without first materializing the path
+        segments on the host. It preserves the scalar path-length-bias random sampling and falls back
+        to prepared paths without consuming additional random numbers if the resident path fails
+        after sampling. */
+    bool storeRadiationFieldAndSimulateForcedPropagationWithoutPreparedPaths(
+        bool primary, const vector<PhotonPacket*>& ppv, vector<Direction>* scatterDirectionv);
 
     /** This function determines the next scattering location of a photon packet in a photon life
         cycle with forced scattering and simulates its propagation to that position. The function
@@ -597,6 +623,20 @@ private:
         last step invalidates the photon packet's path (including geometric and optical depth
         information). The packet is now ready to be scattered into a new direction. */
     void simulateForcedPropagation(PhotonPacket* pp);
+
+    /** This function performs the forced propagation step for a batch of photon packets whose
+        path geometry and cumulative optical-depth information have already been prepared. It
+        preserves the scalar path-length-bias random sampling and uses a packed GPU
+        forced-propagation result kernel when available, falling back to the GPU batch interaction
+        lookup or the CPU cumulative-path lookup without consuming additional random numbers. */
+    void simulateForcedPropagationBatch(const vector<PhotonPacket*>& ppv);
+
+    /** This function handles a chunk of forced-scattering photon packets with an experimental GPU
+        batch for the first path preparation and propagation step. It returns false if the batch
+        mode is not enabled or not applicable. Subsequent scattering events continue through the
+        regular scalar lifecycle. */
+    bool performLifeCycleWithBatchedFirstForcedStep(size_t firstIndex, size_t numIndices, bool primary, bool peel,
+                                                    bool store);
 
     /** This function simulates the propagation of a photon packet to the next scattering location
         in a photon life cycle without forced scattering. It proceeds in a number of steps as
@@ -674,6 +714,22 @@ private:
         scattered; the second argument provides a placeholder peel off photon packet for use by the
         function. */
     void peelOffScattering(PhotonPacket* pp, PhotonPacket* ppp);
+
+    /** This function attempts a direct GPU emission peel-off path for total-only distant frame
+        instruments. It bypasses peel-off PhotonPacket construction and returns false before
+        detector writes for unsupported configurations. */
+    bool peelOffEmissionBatchDirect(const vector<PhotonPacket*>& ppv);
+
+    /** This function attempts to perform scattering peel-off for a batch of photon packets using a
+        GPU batch for the observer-direction extinction optical depths. It supports the
+        consolidated, no-wavelength-change peel-off path for distant instruments and returns false
+        for unsupported configurations so callers can fall back to peelOffScattering(). */
+    bool peelOffScatteringBatch(const vector<PhotonPacket*>& ppv);
+
+    /** This function attempts a stricter direct Henyey-Greenstein GPU scattering peel-off path
+        for total-only distant frame instruments. It bypasses peel-off PhotonPacket construction
+        and returns false before detector writes for unsupported configurations. */
+    bool peelOffScatteringBatchDirect(const vector<PhotonPacket*>& ppv);
 
     //======================== Data Members ========================
 

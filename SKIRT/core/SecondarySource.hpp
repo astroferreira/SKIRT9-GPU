@@ -45,6 +45,11 @@ public:
     /** This function causes the photon packet \em pp to be launched for this source from one of
         the cells in the spatial grid using the given history index and luminosity. */
     virtual void launch(PhotonPacket* pp, size_t historyIndex, double L) const = 0;
+
+    /** This function causes a contiguous batch of photon packets to be launched for this source.
+        The default implementation calls launch() for each packet; subclasses can override it to
+        reuse source-specific mapping work across adjacent history indices. */
+    virtual void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const;
 };
 
 ////////////////////////////////////////////////////////////////

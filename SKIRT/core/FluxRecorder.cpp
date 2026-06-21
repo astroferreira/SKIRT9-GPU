@@ -4,7 +4,10 @@
 ///////////////////////////////////////////////////////////////// */
 
 #include "FluxRecorder.hpp"
+#include "BandWavelengthGrid.hpp"
+#include "FatalError.hpp"
 #include "FITSInOut.hpp"
+#include "GpuAcceleration.hpp"
 #include "Indices.hpp"
 #include "LockFree.hpp"
 #include "Log.hpp"
@@ -17,6 +20,9 @@
 #include "TimeGrid.hpp"
 #include "Units.hpp"
 #include "WavelengthGrid.hpp"
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 
 ////////////////////////////////////////////////////////////////////
 
@@ -60,6 +66,68 @@ namespace
     //  - thus, the number of detector arrays for statistics is this number plus one
     //  - these detector arrays do not need calibration!
     const int maxContributionPower = 4;
+
+    bool frameBandDetectorEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_FRAME_BAND_DETECTOR");
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0
+               && std::strcmp(value, "FALSE") != 0 && std::strcmp(value, "off") != 0
+               && std::strcmp(value, "OFF") != 0 && std::strcmp(value, "no") != 0
+               && std::strcmp(value, "NO") != 0;
+    }
+
+    bool frameBandDetectorDirectEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_FRAME_BAND_DETECTOR_DIRECT");
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0
+               && std::strcmp(value, "FALSE") != 0 && std::strcmp(value, "off") != 0
+               && std::strcmp(value, "OFF") != 0 && std::strcmp(value, "no") != 0
+               && std::strcmp(value, "NO") != 0;
+    }
+
+    bool detectorAccumulatorEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_DETECTOR_ACCUMULATOR");
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0
+               && std::strcmp(value, "FALSE") != 0 && std::strcmp(value, "off") != 0
+               && std::strcmp(value, "OFF") != 0 && std::strcmp(value, "no") != 0
+               && std::strcmp(value, "NO") != 0;
+    }
+
+    void scaleWavelengthArray(Array& array, const vector<double>& factorv)
+    {
+        if (!array.size()) return;
+        if (GpuAcceleration::scaleWavelengthValues(&array[0], factorv.size(), factorv)) return;
+        for (size_t ell = 0; ell != factorv.size(); ++ell) array[ell] *= factorv[ell];
+    }
+
+    void scaleFrameWavelengthArray(Array& array, size_t numPixelsInFrame, const vector<double>& factorv)
+    {
+        if (!array.size()) return;
+        if (GpuAcceleration::scaleFrameWavelengthValues(&array[0], factorv.size(), numPixelsInFrame, factorv)) return;
+        for (size_t ell = 0; ell != factorv.size(); ++ell)
+        {
+            double factor = factorv[ell];
+            size_t begin = ell * numPixelsInFrame;
+            size_t end = begin + numPixelsInFrame;
+            for (size_t lell = begin; lell != end; ++lell) array[lell] *= factor;
+        }
+    }
+
+    void sumOutputArrays(Array& result, const Array& value1, const Array& value2, const Array* value3,
+                         const Array* value4)
+    {
+        result.resize(value1.size());
+        if (value1.size()
+            && GpuAcceleration::sumValues(&result[0], result.size(), &value1[0], &value2[0],
+                                          value3 && value3->size() ? &(*value3)[0] : nullptr,
+                                          value4 && value4->size() ? &(*value4)[0] : nullptr))
+            return;
+
+        result = value1 + value2;
+        if (value3 && value3->size()) result += *value3;
+        if (value4 && value4->size()) result += *value4;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -469,6 +537,322 @@ void FluxRecorder::detect(PhotonPacket* pp, int l, double distance)
 
 ////////////////////////////////////////////////////////////////////
 
+bool FluxRecorder::detectTotalBatch(const vector<PhotonPacket*>& ppv, const vector<int>& pixelv)
+{
+    if (ppv.size() != pixelv.size()) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeSurfaceBrightness || _includeFluxDensity || _local) return false;
+
+    vector<int> keyv;
+    vector<double> valuev;
+    keyv.reserve(ppv.size());
+    valuev.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        PhotonPacket* pp = ppv[i];
+        int l = pixelv[i];
+        if (!pp || l < 0) continue;
+
+        double wavelength = pp->wavelength() * (1. + _redshift);
+        for (int ell : _lambdagrid->bins(wavelength))
+        {
+            double Lext = pp->luminosity() * _lambdagrid->transmission(ell, wavelength);
+            if (_hasMedium)
+            {
+                if (!pp->hasObservedOpticalDepth()) return false;
+                Lext *= exp(-pp->observedOpticalDepth());
+            }
+            size_t lell = static_cast<size_t>(l) + static_cast<size_t>(ell) * _numPixelsInFrame;
+            if (lell > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+            keyv.push_back(static_cast<int>(lell));
+            valuev.push_back(Lext);
+        }
+    }
+    if (keyv.empty()) return true;
+
+    Array& total = _ifu[Total];
+    size_t totalSize = total.size();
+    if (detectorAccumulatorEnabled() && GpuAcceleration::isProcessEnabled())
+    {
+        if (GpuAcceleration::accumulateValuesByKey(&total, totalSize, keyv, valuev)) return true;
+        throw FATALERROR("GPU detector accumulator update failed: " + GpuAcceleration::status());
+    }
+
+    vector<int> compactKeyv;
+    vector<double> compactValuev;
+    if (!GpuAcceleration::sumValuesByKey(keyv, valuev, compactKeyv, compactValuev)) return false;
+    if (compactKeyv.size() != compactValuev.size()) return false;
+
+    for (size_t i = 0; i != compactKeyv.size(); ++i)
+    {
+        int key = compactKeyv[i];
+        if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], compactValuev[i]);
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::detectTotalBatch(const vector<int>& pixelv, const vector<double>& wavelengthv,
+                                    const vector<double>& luminosityv, const vector<double>& tauv)
+{
+    if (pixelv.size() != wavelengthv.size() || pixelv.size() != luminosityv.size()) return false;
+    if (_hasMedium && tauv.size() != pixelv.size()) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeSurfaceBrightness || _includeFluxDensity || _local) return false;
+
+    vector<int> keyv;
+    vector<double> valuev;
+    keyv.reserve(pixelv.size());
+    valuev.reserve(pixelv.size());
+    for (size_t i = 0; i != pixelv.size(); ++i)
+    {
+        int l = pixelv[i];
+        double luminosity = luminosityv[i];
+        if (l < 0 || luminosity <= 0.) continue;
+
+        double wavelength = wavelengthv[i] * (1. + _redshift);
+        for (int ell : _lambdagrid->bins(wavelength))
+        {
+            double Lext = luminosity * _lambdagrid->transmission(ell, wavelength);
+            if (_hasMedium) Lext *= exp(-tauv[i]);
+            size_t lell = static_cast<size_t>(l) + static_cast<size_t>(ell) * _numPixelsInFrame;
+            if (lell > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+            keyv.push_back(static_cast<int>(lell));
+            valuev.push_back(Lext);
+        }
+    }
+    if (keyv.empty()) return true;
+
+    Array& total = _ifu[Total];
+    size_t totalSize = total.size();
+    if (detectorAccumulatorEnabled() && GpuAcceleration::isProcessEnabled())
+    {
+        if (GpuAcceleration::accumulateValuesByKey(&total, totalSize, keyv, valuev)) return true;
+        throw FATALERROR("GPU detector accumulator update failed: " + GpuAcceleration::status());
+    }
+
+    vector<int> compactKeyv;
+    vector<double> compactValuev;
+    if (GpuAcceleration::sumValuesByKey(keyv, valuev, compactKeyv, compactValuev)
+        && compactKeyv.size() == compactValuev.size())
+    {
+        for (size_t i = 0; i != compactKeyv.size(); ++i)
+        {
+            int key = compactKeyv[i];
+            if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], compactValuev[i]);
+        }
+        return true;
+    }
+
+    for (size_t i = 0; i != keyv.size(); ++i)
+    {
+        int key = keyv[i];
+        if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], valuev[i]);
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::detectTotalFrameBandBatch(
+    const vector<Position>& positionv, const vector<double>& wavelengthv, const vector<double>& luminosityv,
+    const vector<double>& tauv, double costheta, double sintheta, double cosphi, double sinphi,
+    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
+    double ypmin, double ypsiz)
+{
+    bool directAccumulator = frameBandDetectorDirectEnabled();
+    if (!directAccumulator && !frameBandDetectorEnabled()) return false;
+    if (positionv.size() != wavelengthv.size() || positionv.size() != luminosityv.size()) return false;
+    if (_hasMedium && tauv.size() != positionv.size()) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeSurfaceBrightness || _includeFluxDensity || _local) return false;
+    if (positionv.empty()) return false;
+
+    const auto* bandGrid = dynamic_cast<const BandWavelengthGrid*>(_lambdagrid);
+    if (!bandGrid) return false;
+
+    int numBands = bandGrid->numBins();
+    if (numBands <= 0) return false;
+    vector<int> bandOffsetv;
+    vector<double> bandWavelengthv;
+    vector<double> bandTransmissionv;
+    vector<double> bandWidthv;
+    bandOffsetv.reserve(static_cast<size_t>(numBands) + 1);
+    bandWidthv.reserve(numBands);
+    bandOffsetv.push_back(0);
+    for (int ell = 0; ell != numBands; ++ell)
+    {
+        const Band* band = bandGrid->band(ell);
+        if (!band || band->transmissionDataSize() < 2) return false;
+        size_t size = band->transmissionDataSize();
+        if (bandWavelengthv.size() + size > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+        const double* lambdav = band->transmissionWavelengthData();
+        const double* transv = band->transmissionValueData();
+        bandWavelengthv.insert(bandWavelengthv.end(), lambdav, lambdav + size);
+        bandTransmissionv.insert(bandTransmissionv.end(), transv, transv + size);
+        bandWidthv.push_back(band->effectiveWidth());
+        bandOffsetv.push_back(static_cast<int>(bandWavelengthv.size()));
+    }
+
+    Array& total = _ifu[Total];
+    size_t totalSize = total.size();
+    if (directAccumulator)
+    {
+        if (GpuAcceleration::frameBandTotalFluxAccumulate(
+                &total, totalSize, positionv, wavelengthv, luminosityv, tauv, _hasMedium, costheta, sintheta,
+                cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz, ypmin, ypsiz,
+                _redshift, _numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv))
+            return true;
+
+        throw FATALERROR("GPU frame-band detector accumulator failed: " + GpuAcceleration::status());
+    }
+
+    vector<int> compactKeyv;
+    vector<double> compactValuev;
+    if (!GpuAcceleration::frameBandTotalFluxSums(
+            positionv, wavelengthv, luminosityv, tauv, _hasMedium, costheta, sintheta, cosphi, sinphi,
+            cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz, ypmin, ypsiz, _redshift,
+            _numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv,
+            compactKeyv, compactValuev)
+        || compactKeyv.size() != compactValuev.size())
+        return false;
+
+    for (size_t i = 0; i != compactKeyv.size(); ++i)
+    {
+        int key = compactKeyv[i];
+        if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], compactValuev[i]);
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::supportsHenyeyGreensteinScatteringFrameBandBatch() const
+{
+    return supportsObservedFrameBandBatch();
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::supportsObservedFrameBandBatch() const
+{
+    if (!frameBandDetectorDirectEnabled()) return false;
+    if (!_hasMedium || !_ms) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeSurfaceBrightness || _includeFluxDensity || _local) return false;
+
+    const auto* bandGrid = dynamic_cast<const BandWavelengthGrid*>(_lambdagrid);
+    if (!bandGrid) return false;
+
+    int numBands = bandGrid->numBins();
+    if (numBands <= 0) return false;
+    for (int ell = 0; ell != numBands; ++ell)
+    {
+        const Band* band = bandGrid->band(ell);
+        if (!band || band->transmissionDataSize() < 2) return false;
+        if (band->effectiveWidth() <= 0.) return false;
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::detectObservedFrameBandBatch(
+    const vector<Position>& positionv, const vector<double>& wavelengthv, const vector<double>& luminosityv,
+    const Direction& bfkobs, double costheta, double sintheta, double cosphi, double sinphi,
+    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
+    double ypmin, double ypsiz)
+{
+    if (!supportsObservedFrameBandBatch()) return false;
+    if (positionv.size() != wavelengthv.size() || positionv.size() != luminosityv.size()) return false;
+    if (positionv.empty()) return false;
+
+    const auto* bandGrid = dynamic_cast<const BandWavelengthGrid*>(_lambdagrid);
+    if (!bandGrid) return false;
+
+    int numBands = bandGrid->numBins();
+    if (numBands <= 0) return false;
+    vector<int> bandOffsetv;
+    vector<double> bandWavelengthv;
+    vector<double> bandTransmissionv;
+    vector<double> bandWidthv;
+    bandOffsetv.reserve(static_cast<size_t>(numBands) + 1);
+    bandWidthv.reserve(numBands);
+    bandOffsetv.push_back(0);
+    for (int ell = 0; ell != numBands; ++ell)
+    {
+        const Band* band = bandGrid->band(ell);
+        if (!band || band->transmissionDataSize() < 2) return false;
+        size_t size = band->transmissionDataSize();
+        if (bandWavelengthv.size() + size > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+        const double* lambdav = band->transmissionWavelengthData();
+        const double* transv = band->transmissionValueData();
+        bandWavelengthv.insert(bandWavelengthv.end(), lambdav, lambdav + size);
+        bandTransmissionv.insert(bandTransmissionv.end(), transv, transv + size);
+        bandWidthv.push_back(band->effectiveWidth());
+        bandOffsetv.push_back(static_cast<int>(bandWavelengthv.size()));
+    }
+
+    Array& total = _ifu[Total];
+    vector<double> distancev(positionv.size(), std::numeric_limits<double>::infinity());
+    return _ms->observedFrameBandAccumulate(
+        positionv, wavelengthv, luminosityv, bfkobs, distancev, &total, total.size(), costheta, sintheta,
+        cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz, ypmin, ypsiz,
+        _redshift, _numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::detectHenyeyGreensteinScatteringFrameBandBatch(
+    const vector<PhotonPacket*>& ppv, const vector<Position>& positionv, const vector<double>& wavelengthv,
+    const Direction& bfkobs, double costheta, double sintheta, double cosphi, double sinphi,
+    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
+    double ypmin, double ypsiz)
+{
+    if (!frameBandDetectorDirectEnabled()) return false;
+    if (!_hasMedium || !_ms) return false;
+    if (ppv.size() != positionv.size() || ppv.size() != wavelengthv.size()) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeSurfaceBrightness || _includeFluxDensity || _local) return false;
+    if (ppv.empty()) return false;
+
+    const auto* bandGrid = dynamic_cast<const BandWavelengthGrid*>(_lambdagrid);
+    if (!bandGrid) return false;
+
+    int numBands = bandGrid->numBins();
+    if (numBands <= 0) return false;
+    vector<int> bandOffsetv;
+    vector<double> bandWavelengthv;
+    vector<double> bandTransmissionv;
+    vector<double> bandWidthv;
+    bandOffsetv.reserve(static_cast<size_t>(numBands) + 1);
+    bandWidthv.reserve(numBands);
+    bandOffsetv.push_back(0);
+    for (int ell = 0; ell != numBands; ++ell)
+    {
+        const Band* band = bandGrid->band(ell);
+        if (!band || band->transmissionDataSize() < 2) return false;
+        size_t size = band->transmissionDataSize();
+        if (bandWavelengthv.size() + size > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+        const double* lambdav = band->transmissionWavelengthData();
+        const double* transv = band->transmissionValueData();
+        bandWavelengthv.insert(bandWavelengthv.end(), lambdav, lambdav + size);
+        bandTransmissionv.insert(bandTransmissionv.end(), transv, transv + size);
+        bandWidthv.push_back(band->effectiveWidth());
+        bandOffsetv.push_back(static_cast<int>(bandWavelengthv.size()));
+    }
+
+    Array& total = _ifu[Total];
+    vector<double> distancev(ppv.size(), std::numeric_limits<double>::infinity());
+    return _ms->henyeyGreensteinScatteringFrameBandAccumulate(
+        ppv, positionv, wavelengthv, bfkobs, distancev, &total, total.size(), costheta, sintheta,
+        cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz, ypmin, ypsiz,
+        _redshift, _numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv);
+}
+
+////////////////////////////////////////////////////////////////////
+
 void FluxRecorder::flush()
 {
     // record the dangling contributions from all threads
@@ -477,6 +861,14 @@ void FluxRecorder::flush()
         recordContributions(contributionList);
         contributionList->reset();
     }
+
+    if ((detectorAccumulatorEnabled() || frameBandDetectorDirectEnabled())
+        && _recordTotalOnly && !_recordPolarization && !_recordStatistics
+        && _includeSurfaceBrightness && !_includeFluxDensity && !_local && _ifu[Total].size()
+        && GpuAcceleration::isProcessEnabled()
+        && !GpuAcceleration::retrieveAndClearAccumulatedValues(&_ifu[Total], begin(_ifu[Total]),
+                                                               _ifu[Total].size()))
+        throw FATALERROR("GPU frame-band detector accumulator flush failed: " + GpuAcceleration::status());
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -505,6 +897,28 @@ void FluxRecorder::calibrateAndWrite()
                           : 4. * atan(0.5 * _pixelSizeX / _angularDiameterDistance)
                                 * atan(0.5 * _pixelSizeY / _angularDiameterDistance);
 
+    // convert from recorded quantities to output quantities and from internal units to user-selected output units
+    // (for performance reasons, determine the units scaling factor only once for each wavelength)
+    vector<double> sedFactorv(_includeFluxDensity ? _numWavelengths : 0);
+    vector<double> ifuFactorv(_includeSurfaceBrightness ? _numWavelengths : 0);
+    for (int ell = 0; ell != _numWavelengths; ++ell)
+    {
+        if (_includeFluxDensity)
+        {
+            sedFactorv[ell] = 1. / fourpid2 / _lambdagrid->effectiveWidth(ell)
+                              * units->ofluxdensity(_lambdagrid->wavelength(ell), 1.);
+        }
+        if (_includeSurfaceBrightness)
+        {
+            ifuFactorv[ell] = 1. / fourpid2 / omega / _lambdagrid->effectiveWidth(ell)
+                              * units->osurfacebrightness(_lambdagrid->wavelength(ell), 1.);
+        }
+    }
+    if (_includeFluxDensity)
+        for (auto& array : _sed) scaleWavelengthArray(array, sedFactorv);
+    if (_includeSurfaceBrightness)
+        for (auto& array : _ifu) scaleFrameWavelengthArray(array, _numPixelsInFrame, ifuFactorv);
+
     // ---------------------- local helper functions ----------------------
 
     // "global" arrays that can be inserted into the lists constructed by the build functions below
@@ -520,8 +934,9 @@ void FluxRecorder::calibrateAndWrite()
             arrayPtrs.push_back(&arrays[Total]);
         else
         {
-            total = arrays[PrimaryDirect] + arrays[PrimaryScattered];
-            if (_hasMediumEmission) total += arrays[SecondaryDirect] + arrays[SecondaryScattered];
+            sumOutputArrays(total, arrays[PrimaryDirect], arrays[PrimaryScattered],
+                            _hasMediumEmission ? &arrays[SecondaryDirect] : nullptr,
+                            _hasMediumEmission ? &arrays[SecondaryScattered] : nullptr);
             arrayPtrs.push_back(&total);
         }
 
@@ -589,8 +1004,9 @@ void FluxRecorder::calibrateAndWrite()
             arrayPtrs.push_back(&arrays[Total]);
         else
         {
-            total = arrays[PrimaryDirect] + arrays[PrimaryScattered];
-            if (_hasMediumEmission) total += arrays[SecondaryDirect] + arrays[SecondaryScattered];
+            sumOutputArrays(total, arrays[PrimaryDirect], arrays[PrimaryScattered],
+                            _hasMediumEmission ? &arrays[SecondaryDirect] : nullptr,
+                            _hasMediumEmission ? &arrays[SecondaryScattered] : nullptr);
             arrayPtrs.push_back(&total);
         }
 
@@ -674,16 +1090,6 @@ void FluxRecorder::calibrateAndWrite()
     // write SEDs to a single text file with multiple columns
     if (_includeFluxDensity)
     {
-        // convert from recorded quantities to output quantities and from internal units to user-selected output units
-        // (for performance reasons, determine the units scaling factor only once for each wavelength)
-        for (int ell = 0; ell != _numWavelengths; ++ell)
-        {
-            double factor = 1. / fourpid2 / _lambdagrid->effectiveWidth(ell)
-                            * units->ofluxdensity(_lambdagrid->wavelength(ell), 1.);
-            for (auto& array : _sed)
-                if (array.size()) array[ell] *= factor;
-        }
-
         // build a list of column names and corresponding pointers to sed arrays (which may be empty)
         vector<string> sedNames;
         vector<Array*> sedArrays;
@@ -735,19 +1141,6 @@ void FluxRecorder::calibrateAndWrite()
     // write IFUs to FITS files (one file per IFU)
     if (_includeSurfaceBrightness)
     {
-        // convert from recorded quantities to output quantities and from internal units to user-selected output units
-        // (for performance reasons, determine the units scaling factor only once for each wavelength)
-        for (int ell = 0; ell != _numWavelengths; ++ell)
-        {
-            double factor = 1. / fourpid2 / omega / _lambdagrid->effectiveWidth(ell)
-                            * units->osurfacebrightness(_lambdagrid->wavelength(ell), 1.);
-            size_t begin = ell * _numPixelsInFrame;
-            size_t end = begin + _numPixelsInFrame;
-            for (auto& array : _ifu)
-                if (array.size())
-                    for (size_t lell = begin; lell != end; ++lell) array[lell] *= factor;
-        }
-
         // copy the wavelength grid in output units
         Array wavegrid(_numWavelengths);
         for (int ell = 0; ell != _numWavelengths; ++ell)

@@ -48,6 +48,27 @@ void TreeSpatialGrid::setupSelfAfter()
         }
     }
 
+    _traversalNodeBounds.clear();
+    _traversalChildBegin.resize(numNodes);
+    _traversalChildCount.resize(numNodes);
+    _traversalChildIndex.clear();
+    _traversalCellIndex = _cellindexv;
+    _traversalNodeBounds.reserve(6 * static_cast<size_t>(numNodes));
+    for (int l = 0; l != numNodes; ++l)
+    {
+        const TreeNode* node = _nodev[l];
+        _traversalNodeBounds.push_back(node->xmin());
+        _traversalNodeBounds.push_back(node->ymin());
+        _traversalNodeBounds.push_back(node->zmin());
+        _traversalNodeBounds.push_back(node->xmax());
+        _traversalNodeBounds.push_back(node->ymax());
+        _traversalNodeBounds.push_back(node->zmax());
+        _traversalChildBegin[l] = static_cast<int>(_traversalChildIndex.size());
+        const auto& children = node->children();
+        _traversalChildCount[l] = static_cast<int>(children.size());
+        for (const TreeNode* child : children) _traversalChildIndex.push_back(child->id());
+    }
+
     // determine the number of cells at each level in the tree hierarchy
     vector<int> countv;
     int numCells = _idv.size();

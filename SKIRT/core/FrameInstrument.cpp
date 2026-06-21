@@ -42,11 +42,83 @@ void FrameInstrument::detect(PhotonPacket* pp)
 
 ////////////////////////////////////////////////////////////////////
 
+bool FrameInstrument::detectTotalBatch(const vector<PhotonPacket*>& ppv)
+{
+    vector<int> pixelv(ppv.size(), -1);
+    for (size_t i = 0; i != ppv.size(); ++i)
+        if (ppv[i]) pixelv[i] = pixelOnDetector(ppv[i]);
+    return instrumentFluxRecorder()->detectTotalBatch(ppv, pixelv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FrameInstrument::detectTotalBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                                       const vector<double>& luminosityv, const vector<double>& tauv)
+{
+    if (instrumentFluxRecorder()->detectTotalFrameBandBatch(
+            positionv, wavelengthv, luminosityv, tauv, _costheta, _sintheta, _cosphi, _sinphi, _cosomega,
+            _sinomega, _Nxp, _Nyp, _xpmin, _xpsiz, _ypmin, _ypsiz))
+        return true;
+
+    vector<int> pixelv(positionv.size(), -1);
+    for (size_t i = 0; i != positionv.size(); ++i) pixelv[i] = pixelOnDetector(positionv[i]);
+    return instrumentFluxRecorder()->detectTotalBatch(pixelv, wavelengthv, luminosityv, tauv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FrameInstrument::supportsHenyeyGreensteinScatteringFrameBandBatch()
+{
+    return instrumentFluxRecorder()->supportsHenyeyGreensteinScatteringFrameBandBatch();
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FrameInstrument::supportsObservedFrameBandBatch()
+{
+    return instrumentFluxRecorder()->supportsObservedFrameBandBatch();
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FrameInstrument::detectObservedFrameBandBatch(const vector<Position>& positionv,
+                                                  const vector<double>& wavelengthv,
+                                                  const vector<double>& luminosityv)
+{
+    if (positionv.empty()) return false;
+    Direction bfkobs = this->bfkobs(positionv.front());
+    return instrumentFluxRecorder()->detectObservedFrameBandBatch(
+        positionv, wavelengthv, luminosityv, bfkobs, _costheta, _sintheta, _cosphi, _sinphi,
+        _cosomega, _sinomega, _Nxp, _Nyp, _xpmin, _xpsiz, _ypmin, _ypsiz);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FrameInstrument::detectHenyeyGreensteinScatteringFrameBandBatch(const vector<PhotonPacket*>& ppv,
+                                                                     const vector<Position>& positionv,
+                                                                     const vector<double>& wavelengthv)
+{
+    if (positionv.empty()) return false;
+    Direction bfkobs = this->bfkobs(positionv.front());
+    return instrumentFluxRecorder()->detectHenyeyGreensteinScatteringFrameBandBatch(
+        ppv, positionv, wavelengthv, bfkobs, _costheta, _sintheta, _cosphi, _sinphi, _cosomega,
+        _sinomega, _Nxp, _Nyp, _xpmin, _xpsiz, _ypmin, _ypsiz);
+}
+
+////////////////////////////////////////////////////////////////////
+
 int FrameInstrument::pixelOnDetector(const PhotonPacket* pp) const
+{
+    return pixelOnDetector(pp->position());
+}
+
+////////////////////////////////////////////////////////////////////
+
+int FrameInstrument::pixelOnDetector(const Position& bfr) const
 {
     // get the position
     double x, y, z;
-    pp->position().cartesian(x, y, z);
+    bfr.cartesian(x, y, z);
 
     // transform to detector coordinates using inclination, azimuth, and roll angle
     double xpp = -_sinphi * x + _cosphi * y;

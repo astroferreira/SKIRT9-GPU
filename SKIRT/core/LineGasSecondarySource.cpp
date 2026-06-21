@@ -8,6 +8,7 @@
 #include "Constants.hpp"
 #include "EmittingGasMix.hpp"
 #include "FatalError.hpp"
+#include "GpuAcceleration.hpp"
 #include "Log.hpp"
 #include "MediumSystem.hpp"
 #include "NR.hpp"
@@ -60,7 +61,7 @@ double LineGasSecondarySource::prepareLuminosities()
 
     // calculate the total luminosity, and normalize the individual luminosities to unity
     double L = _Lv.sum();
-    _Lv /= L;
+    if (!GpuAcceleration::divideValues(&_Lv[0], numCells, L)) _Lv /= L;
 
     // log the luminosity and the number of emitting cells
     auto log = find<Log>();
@@ -83,14 +84,17 @@ void LineGasSecondarySource::preparePacketMap(size_t firstIndex, size_t numIndic
 {
     int numCells = _ms->numCells();
 
-    // determine a uniform weight for each cell with non-negligable emission, and normalize to unity
-    Array wv(numCells);
-    for (int m = 0; m != numCells; ++m) wv[m] = _Lv[m] > 0. ? 1. : 0.;
-    wv /= wv.sum();
-
     // calculate the final, composite-biased launch weight for each cell, normalized to unity
     double xi = _config->secondarySpatialBias();
-    _Wv = (1 - xi) * _Lv + xi * wv;
+    _Wv.resize(numCells);
+    if (!GpuAcceleration::compositeLaunchWeights(&_Lv[0], numCells, xi, &_Wv[0]))
+    {
+        // determine a uniform weight for each cell with non-negligable emission, and normalize to unity
+        Array wv(numCells);
+        for (int m = 0; m != numCells; ++m) wv[m] = _Lv[m] > 0. ? 1. : 0.;
+        wv /= wv.sum();
+        _Wv = (1 - xi) * _Lv + xi * wv;
+    }
 
     // determine the first history index for each cell
     _Iv.resize(numCells + 1);

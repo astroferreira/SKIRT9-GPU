@@ -33,6 +33,10 @@ simulations in the ski files specified on the command line according to the foll
 
 - The -d option enables data parallelization mode for multiple processes.
 
+- The -g option enables runtime GPU acceleration for supported photon-cycle kernels.
+
+- The -G option tests the runtime GPU backend and exits.
+
 - The -b option forces brief console logging, i.e. only success and error messages are shown rather than all progress
   messages. If there are multiple parallel simulations (see the -s option), the -b option is turned on automatically
   to avoid a plethora of randomly intermixing messages. If there is only one simulation at a time, the console shows
@@ -100,6 +104,9 @@ private:
 
     /** This function exports a smile schema. This is an undocumented option. */
     int doSmileSchema();
+
+    /** This function tests the runtime GPU backend. */
+    int doGpuDiagnostics();
 
     /** This function adds the ski filenames corresponding to the specified filepath to the
         internal list, after processing any wildcards and performing recursive descent if so

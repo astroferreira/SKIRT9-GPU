@@ -4,6 +4,7 @@
 ///////////////////////////////////////////////////////////////// */
 
 #include "BuildInfo.hpp"
+#include "GpuAcceleration.hpp"
 #include "ProcessManager.hpp"
 #include "SignalHandler.hpp"
 #include "SimulationItemRegistry.hpp"
@@ -24,6 +25,10 @@ int main(int argc, char** argv)
     // Add all simulation items to the item registry
     string version = BuildInfo::projectVersion();
     SimulationItemRegistry registry(version, "9");
+
+#ifdef SKIRTGPU_BINARY
+    GpuAcceleration::setProcessEnabled(true);
+#endif
 
     // handle the command line arguments
     SkirtCommandLineHandler handler;

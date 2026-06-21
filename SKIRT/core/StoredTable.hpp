@@ -550,6 +550,29 @@ public:
         return _qtyBeg;
     }
 
+    /** This function returns a pointer to the first element in the selected quantity data array.
+        For multidimensional tables, consecutive selected quantity values are separated by
+        quantityStep() elements in the underlying table storage. */
+    const double* quantityDataRaw() const { return _qtyBeg; }
+
+    /** This function returns the step size between consecutive selected quantity values in the
+        underlying table storage. */
+    size_t quantityStep() const { return _qtyStep; }
+
+    /** This function returns true if the table axis indicated by the zero-based template argument
+        uses logarithmic interpolation. */
+    template<size_t axisIndex, typename = std::enable_if_t<axisIndex <= N>> bool axisIsLog() const
+    {
+        return _axLog[axisIndex];
+    }
+
+    /** This function returns true if the selected quantity uses logarithmic interpolation. */
+    bool quantityIsLog() const { return _qtyLog; }
+
+    /** This function returns true if out-of-range values on the first axis are clamped rather
+        than treated as zero. */
+    bool clampsFirstAxis() const { return _clamp; }
+
     /** This template function returns a copy of the value at the specified N indices. There is no
         range checking. Out-of-range index values cause unpredictable behavior. */
     template<typename... Indices, typename = std::enable_if_t<CompileTimeUtils::isIntegralArgList<N, Indices...>()>>

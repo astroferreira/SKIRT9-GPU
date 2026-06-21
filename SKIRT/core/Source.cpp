@@ -6,6 +6,7 @@
 #include "Source.hpp"
 #include "Configuration.hpp"
 #include "Log.hpp"
+#include "PhotonPacket.hpp"
 #include "Random.hpp"
 #include "StringUtils.hpp"
 #include "Units.hpp"
@@ -42,5 +43,12 @@ void Source::informAvailableWavelengthRange(Range available, string itemType)
 //////////////////////////////////////////////////////////////////////
 
 void Source::prepareForLaunch(double /*sourceBias*/, size_t /*firstIndex*/, size_t /*numIndices*/) {}
+
+//////////////////////////////////////////////////////////////////////
+
+void Source::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const
+{
+    for (size_t i = 0; i != numPackets; ++i) launch(&ppv[i], firstHistoryIndex + i, L);
+}
 
 //////////////////////////////////////////////////////////////////////
