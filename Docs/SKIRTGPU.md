@@ -68,12 +68,12 @@ BC03 and MAPPINGS SEDs, dust attenuation, scattering and emission.
   normalized luminosity vector is scaled on the device, and the emitting-cell count and composite
   spatial-bias weight vector are computed on the device; the final history-index prefix remains on
   the CPU for exact compatibility with the current rounding behavior.
-- Secondary emission now uses the same contiguous batch launch entry point as primary emission. The
-  default secondary-source implementation preserves scalar behavior, while the dust secondary source
-  walks contiguous cell history-index ranges once and reuses the cell mapping for every packet in
-  the range. This is still CPU-orchestrated packet initialization, but it removes repeated
-  source/cell binary searches from the secondary photon-shooting hot path and provides the hook for
-  future GPU dust-emission wavelength sampling.
+- Secondary emission uses the same contiguous batch launch entry point as primary emission. The dust
+  source walks contiguous cell history-index ranges once and uses four inner launch workers per GPU
+  feeder by default, preserving large device submissions while parallelizing CPU-side wavelength and
+  position sampling. Supported resident runs write packed launch states while reusing one temporary
+  `PhotonPacket` per worker instead of allocating one object per history.
+  `SKIRTGPU_SECONDARY_LAUNCH_THREADS` controls this inner pool.
 - Optical-depth accumulation has packed batch GPU kernels for extinction-only and
   scattering/absorption paths. Constant-section media and dust-section lookup tables are both
   covered; the table path accepts one wavelength per path. These kernels accept variable segment
@@ -122,23 +122,44 @@ BC03 and MAPPINGS SEDs, dust attenuation, scattering and emission.
   for explicit absorption and for non-explicit dust-table paths without moving media. These kernels
   are wired into the first forced-scattering batch used by production `-g` runs when the medium
   supports it.
-- Forced-scattering rounds can be processed in packet waves after the first
-  propagation step. In this mode, material-specific scattering and scattering peel-off remain
-  CPU-side, but every subsequent path/tau preparation, radiation-field contribution, and forced
-  propagation step is batched again instead of returning each photon packet to scalar lifecycle
-  transport.
-- Scattering peel-off profiling is split from material scattering in the experimental
-  forced-round controller. `SKIRTGPU_PROFILE_BATCH=1` now separates initial emission peel-off from
-  later scattering peel-off and also reports whether each used the batch wrapper or scalar fallback.
-  The 20 June 2026 262144-packet RUN075 profile showed initial emission peel-off fully on the batch
-  observer-extinction path (`emission_peel_scalar_ms=0`), while later scattering peel-off still fell
-  back to scalar work (`later_peel_scalar_ms` about 2.7-3.5 seconds per profiled wave). A host-side
-  batch wrapper for distant-instrument scattering peel-off is available as a separate opt-in
-  diagnostic. For total-only `FrameInstrument` outputs this wrapper can now reduce detector
-  `(pixel,wavelength)` additions with a generic GPU key-sum kernel, and its compact peel-packet
-  storage avoids constructing a full packet wave per observer. It is still not part of the faster
-  RUN075 path because the batch currently adds more host peel-off packet construction and GPU path
-  setup overhead than it saves.
+- Forced-scattering rounds can be processed in packet waves after the first propagation step.
+  Every subsequent path/tau preparation, radiation-field contribution, and forced propagation step
+  is batched again. For supported single-dust, nonmoving, unpolarized configurations, lifecycle
+  waves of at least 65536 packets now also use the direct HG scattering peel-off batch by default.
+  The fused CUDA operation evaluates the phase function and observer extinction together. A custom
+  two-dimensional kernel processes every exact unique observer direction in one launch and uploads
+  the packet state once per scattering round. The production path also projects matching Frames,
+  bins disjoint-grid SEDs, applies optional SED apertures, and writes directly to per-instrument
+  persistent GPU accumulators in that launch. Observer luminosities, detector keys, and detector
+  values no longer make a GPU-to-CPU-to-GPU round trip. Smaller parent lifecycle waves retain the
+  scalar scattering peel-off because the per-round GPU launch and transfer overhead is larger than
+  the saved CPU work.
+- Supported single-dust, nonmoving, unpolarized Voronoi workloads now run complete packet lifecycles
+  through the resident mixed-precision CUDA path by default for waves of at least 65536 packets.
+  Initial emission detection, analog propagation, later HG scattering, Frame/SED accumulation, and
+  termination remain on the selected GPU. Final secondary-emission passes can use the same path
+  without allocating or updating a radiation-field accumulator; this removes the old prepared-path
+  and host-driven peel-off fallback from the secondary shooting phase.
+- The mixed-precision lifecycle caches normalized FP32 bisector planes for every Voronoi neighbor
+  edge, avoiding repeated site-coordinate subtraction and plane reconstruction in the innermost
+  packet and detector traversal. Imported-source waves also find each packet's initial Voronoi cell
+  while preparing wavelength lookup pairs, avoiding a second full initial-cell search during
+  emission peel-off. When `minScattEvents` is zero, the lifecycle omits the scattering-count buffer
+  and its initialization and update traffic. After each propagation round, the compacted survivor
+  list is fed back into the random-generation and transport kernels so terminated packet slots are
+  no longer relaunched.
+- Scattering peel-off profiling is split from material scattering in the forced-round controller.
+  `SKIRTGPU_PROFILE_BATCH=1` separates initial emission peel-off from later scattering peel-off and
+  reports batch versus scalar time. In a 70 second, 268435456-packet two-RTX-5090 profile on
+  `TNG50-1_99_746970_sdss_broadband.ski`, direct fused HG peel-off plus the multi-observer kernel
+  first reduced mean total time from 43.6 seconds to 14.4 seconds per 262144-packet lifecycle wave.
+  Fusing Frame and SED accumulation into the same multi-observer launch, then reusing the validated
+  immutable grid topology, reduced the complete direct observer/detector group from 1481 ms to
+  428 ms with the same uncapped scheduler. The automatic eight-feeder scheduler reached 12.4% in a
+  matched 60-second window versus 9.4% before detector fusion. Resident propagation contention now
+  limits the end-to-end gain. The GPU accumulators, key reductions, and Voronoi traversal reuse
+  persistent per-runtime high-water storage, and exactly matching noncontiguous Frame/SED observer
+  directions are traced only once.
 - Total-only `FrameInstrument` outputs with `BandWavelengthGrid` have an opt-in frame-band detector
   kernel (`SKIRTGPU_FRAME_BAND_DETECTOR=1`) that projects packet positions, interpolates band
   transmission curves, applies extinction, and reduces frame pixels by key on the GPU. It is
@@ -154,26 +175,32 @@ BC03 and MAPPINGS SEDs, dust attenuation, scattering and emission.
   kernel that returns one optical depth per peel-off packet without materializing path segments on
   the host. Direct frame-instrument emission peel-off passes the single distant-observer direction
   through a shared-direction overload, avoiding per-batch host `SpatialGridPath` construction and
-  avoiding a temporary direction vector. The resulting observed optical depths are stored on the
-  peel-off packets before the existing instrument detection code runs, preserving the scalar
-  detector accumulation order for SED, image, and IFU/datacube outputs.
+  avoiding a temporary direction vector. Total-only `SEDInstrument` outputs now participate in the
+  same direct batch dispatch as `FrameInstrument` outputs. A custom opt-in frame accumulator kernel
+  can return the optical depth it already calculated so a matching SED consumes the same observer
+  trace rather than launching another one. On the large 262144-packet profile this reduced direct
+  emission peel-off from 1.724 seconds to 1.403 seconds per wave, but it remains opt-in because the
+  5-million-packet RUN000 case regressed from 37.0 seconds to 39.3 seconds overall.
 - Imported BC03 and MAPPINGS source luminosity setup can evaluate stored-table CDF normalization
   factors in a single GPU batch over all imported entities. The CPU scalar `SEDFamily::cdf()` path
   remains the fallback for unsupported SED families or unavailable GPU runtime.
-- Imported BC03 and MAPPINGS primary-source launch preparation can batch sample source wavelengths
-  and normalized SED probabilities on the GPU for the history-index range assigned to a source.
-  CPU-generated random choices and bias-distribution samples are retained, and unsupported SED
-  families fall back to the existing per-entity launch cache.
-- Primary `SourceSystem` launch now has a contiguous batch API. The default implementation keeps
-  scalar launch behavior, while `ImportedSource` walks source/entity history-index ranges once and
-  reuses the existing GPU-batched wavelength preparation. This is still CPU-orchestrated for
-  positions, directions, velocities, and `PhotonPacket` state, but it removes one source/entity
-  lookup layer from the 65536-packet forced-scattering chunks and provides the compatibility hook
-  for a future device-resident imported-source launch kernel.
-- Imported-source batches without imported velocities can now convert pre-drawn isotropic launch
-  direction randoms to direction vectors with a GPU batch kernel. The CPU still owns the random
-  stream and packet initialization, so the kernel is a launch-path primitive rather than a complete
-  resident source kernel.
+- High-count imported BC03 and MAPPINGS primary sources now use a custom CUDA source-launch kernel.
+  It maps history indices to source entities and samples the entity SED, optional logarithmic
+  wavelength bias, cubic-spline particle position, and isotropic direction on both GPUs. A reusable
+  per-entity FP32 PDF/CDF cache is uploaded once per GPU, while wavelengths, luminosities, and the
+  packed launch result remain FP64.
+- Supported imported primary sources now initialize the resident lifecycle directly on the selected
+  GPU. Source entity, wavelength, position, direction, luminosity, radiation-field bin, and random
+  state are generated into the resident structure-of-arrays buffers, so primary packets do not make
+  a source-device-to-host-to-lifecycle-device round trip. Unsupported source configurations retain
+  the packed launch bridge, which avoids transient `PhotonPacket` objects. The older per-packet GPU
+  spectrum-precomputation path remains diagnostic only.
+- Supported single-dust, nonmoving, unpolarized Voronoi simulations also initialize dust-secondary
+  packets directly in the resident lifecycle buffers. A reusable per-cell FP32 spectrum cache and
+  history-to-cell map are uploaded once per GPU; the CUDA source kernel samples wavelength,
+  luminosity, isotropic direction, and a position inside the emitting Voronoi cell. Position sampling
+  rejection-tests the cell bounding box against the resident Voronoi neighbor topology. Unsupported
+  dust configurations and gas secondary sources retain the packed launch bridge.
 - `SpatialGridPath` segment storage is now reserved lazily on first `addSegment()` instead of in
   the constructor. This avoids allocating a 1000-segment path buffer for every `PhotonPacket` in a
   GPU resident batch before any host path is materialized, while preserving the reuse benefit for
@@ -207,6 +234,52 @@ packets, so they are part of the production ray-tracing flow rather than a stand
   Monte Carlo progress chunk launches packets, batches initial emission peel-off extinction for
   distant instruments, then tries the resident Voronoi/table radiation-field plus forced-
   propagation GPU pass before falling back to prepared-path batch kernels.
+- `SKIRTGPU_RESIDENT_LIFECYCLE=0`: opt out of the complete resident packet lifecycle. It is enabled
+  by default for supported waves of at least `SKIRTGPU_RESIDENT_MIN_PACKETS` packets (65536 by
+  default), including final secondary-emission passes that do not store another radiation field.
+- `SKIRTGPU_RESIDENT_MIXED_PRECISION=0`: use the slower double-precision resident geometry path.
+  Normalized Voronoi geometry and density traversal use FP32 by default while packet luminosities,
+  wavelengths, detector accumulators, and radiation-field accumulators remain FP64.
+- `SKIRTGPU_RESIDENT_ANALOG_TRANSPORT=0`: use forced interaction sampling in the resident lifecycle.
+  The default analog transport samples one untruncated optical depth per scattering event and avoids
+  a second traversal of each path.
+- `SKIRTGPU_RESIDENT_SAMPLE_OBSERVER=0|1`: control one-observer sampling for initial-emission and
+  scattering peel-off. It is enabled automatically for resident waves containing at least 1,048,576
+  packets and disabled below that threshold. The sampled contribution is multiplied by the observer
+  count, preserving the expectation value while increasing Monte Carlo variance. Explicit `0`
+  disables sampling and explicit `1` forces it for every supported wave.
+- `SKIRTGPU_RESIDENT_ASYNC_ROUNDS=1`: enqueue fixed groups of resident lifecycle rounds before a
+  completion check. This remains opt-in because the tested groups were slower than synchronized
+  active-wave compaction.
+- `SKIRTGPU_RESIDENT_ASYNC_ROUND_GROUP=<count>`: set the number of rounds in each asynchronous group;
+  the default is 32. Groups of 2 and 32 both regressed the high-count benchmark, so asynchronous
+  rounds remain disabled by default.
+- `SKIRTGPU_LIFECYCLE_BLOCK_SIZE=<count>`: override the resident transport/scatter CUDA block size.
+  Values must be multiples of 32 from 32 through 1024; the tuned default is 320.
+- `SKIRTGPU_LIFECYCLE_DETECTOR_BLOCK_SIZE=<count>`: independently override the resident detector
+  block size with the same validation. The tuned default is 256.
+- `SKIRTGPU_SOURCE_LAUNCH=0`: disable the default custom CUDA imported-source launch kernel and use
+  scalar CPU packet generation.
+- `SKIRTGPU_SOURCE_LAUNCH_MIN_PACKETS=<count>`: set the minimum packet count per imported source
+  component for the custom CUDA source-launch kernel. The default is 4,194,304, retaining the CPU
+  path where small workloads cannot amortize source-cache construction and transfer.
+- `SKIRTGPU_PACKED_SOURCE_LIFECYCLE=0`: disable the default packed primary/dust-secondary launch
+  bridge and construct a full `PhotonPacket` object for every history before resident submission.
+  The fallback remains automatic for moving or polarized dust, gas sources, unsupported primary
+  sources, packet-launch callbacks, and nonresident detector or medium configurations.
+- `SKIRTGPU_DEVICE_SOURCE_LIFECYCLE=0`: disable direct same-device imported-source initialization
+  and use the packed source-to-lifecycle bridge. The fallback is automatic when a lifecycle wave
+  crosses source components or uses an unsupported source or callback.
+- `SKIRTGPU_DEVICE_DUST_SOURCE_LIFECYCLE=0`: disable direct same-device dust-secondary initialization
+  and use the packed source-to-lifecycle bridge. Direct dust launch currently requires a single dust
+  medium on a Voronoi grid, no moving media or spheroidal polarization, one cell per library entry,
+  and either no wavelength bias or logarithmic wavelength bias.
+- `SKIRTGPU_PRECOMPUTE_SOURCE_SPECTRA=1`: opt into imported-source GPU spectrum precomputation.
+  It is disabled by default because the 6.8-million-packet benchmark spent about 46 seconds in this
+  step after logging `Launching ... photon packets`, which looked like a transport stall and was much
+  slower than on-demand source spectrum caching.
+- `SKIRTGPU_SECONDARY_LAUNCH_THREADS=<count>`: set the inner dust-secondary packet-construction pool
+  per GPU feeder. The GPU default is four (maximum eight); CPU-only runs retain the regular scheduler.
 - `SKIRTGPU_RESIDENT_FORCED=0`: opt out of the resident Voronoi/table store-radiation-field plus
   forced-propagation pass and use the older prepared-path batch path.
 - `SKIRTGPU_RESIDENT_SAMPLE_ON_GPU=0`: keep the resident Voronoi/table pass but sample the forced
@@ -214,16 +287,21 @@ packets, so they are part of the production ray-tracing flow rather than a stand
   fallback is useful for debugging; on the current RUN075 profile it was slower than the default
   sampled resident path.
 - `SKIRTGPU_BATCH_FIRST_FORCED_CHUNK=<count>`: photon-packet chunk size used by the
-  forced-scattering batch. The default is 262144 for production `-g` runs on the current
-  host-driven pipeline because it improved RUN075 two-RTX-5090 primary-emission throughput after
-  direct RF accumulation became the default. Setting this to 1000 is useful for matched-order
-  regression checks against older smoke baselines; setting it back to 65536 is useful for A/B
-  comparisons with earlier profiles.
-- `SKIRTGPU_LIFECYCLE_THREADS=<count>`: optionally cap CPU feeder threads for GPU-enabled photon
-  lifecycle work. The default is uncapped because RUN075 throughput was best with the regular SKIRT
-  CPU parallel scheduler. On 20 June 2026 with the 65536 chunk and two balanced RTX 5090 devices,
-  4, 8, 12, and 16 lifecycle threads reached 3.0%, 4.8%, 5.9%, and 6.5% primary progress in a
-  65 second RUN075 window, still below the uncapped 6.9%.
+  forced-scattering batch. The default is 8,388,608 for production `-g` runs. A 4 September 2026
+  sweep on the 536.9-million-packet two-RTX-5090 benchmark found 4,194,304 and 8,388,608 packets
+  faster than 1,048,576 or 2,097,152, with no measurable primary gain at the larger setting.
+  Setting this to 1000 is useful for
+  matched-order regression checks against older smoke baselines; setting it back to 262144 is useful
+  for A/B comparisons with the preceding production default.
+- `SKIRTGPU_LIFECYCLE_THREADS=<count>`: override the CPU feeder-thread limit for all GPU-enabled
+  photon-lifecycle work; `0` keeps the regular uncapped SKIRT scheduler.
+- `SKIRTGPU_PRIMARY_LIFECYCLE_THREADS=<count>` and
+  `SKIRTGPU_SECONDARY_LIFECYCLE_THREADS=<count>`: independently override the primary and secondary
+  feeder limits, taking precedence over `SKIRTGPU_LIFECYCLE_THREADS`. Without an override, segments
+  containing at least 4,194,304 packets use six feeders for direct-device primary emission, four for
+  direct-device dust-secondary emission, and twelve for CPU-generated packed secondary emission.
+  Smaller segments remain uncapped. The threshold leaves low-packet workloads on the regular
+  scheduler, where CPU execution can be faster after GPU setup and launch overhead are included.
 - `SKIRTGPU_LIMIT_LIFECYCLE_THREADS=0`: ignore `SKIRTGPU_LIFECYCLE_THREADS` even if it is set.
 - `SKIRTGPU_BATCH_FORCED_ROUNDS=0`: opt out of batched later forced-scattering rounds after the
   first propagation step. This is enabled by default for production `-g` runs because it improves
@@ -233,22 +311,23 @@ packets, so they are part of the production ray-tracing flow rather than a stand
   post-RF-accumulator RUN075 profile it slightly improved some 65536-packet chunk timings but did
   not improve the capped progress, and combining it with the 262144-packet wave was slightly
   slower than the promoted default, so it remains opt-in.
-- `SKIRTGPU_BATCH_SCATTER_PEEL=1`: opt into the diagnostic host-side scattering peel-off batch for
-  distant instruments during batched forced rounds. Total-only frame detectors use a GPU key-sum
-  reduction for compact flux accumulation in this mode. It is off by default because the 20 June
-  2026 RUN075 diagnostics were slower than the promoted scalar-peel batched-round path. After the
-  shared-direction observer-extinction cleanup and the 262144-packet default promotion, capped
-  profile retries still showed worse throughput: the generic host batch scatter-peel path reached
-  only 7.1%, and the direct HG path combined with the direct frame-band accumulator spent about
-  11-18 seconds in `later_peel_batch_ms` per profiled wave. This remains diagnostic.
-- `SKIRTGPU_BATCH_SCATTER_PEEL_FUSED=1`: when combined with
-  `SKIRTGPU_BATCH_SCATTER_PEEL_DIRECT=1`, opt into the fused Voronoi/table HG observer-luminosity
-  kernel. This kernel computes the HG phase factor and observer extinction in one GPU pass and
-  writes luminosities that are ready for total-frame detection. It remains diagnostic: with the
-  65536 chunk on the full RUN075 file, 65 second progress was 2.2% for direct HG scatter peel-off
-  and 2.4% for fused direct, versus 6.9% for the promoted default route. A 20 June 2026 retry of
-  fused direct scattering peel-off after direct RF accumulation was promoted still reached only
-  4.0% in the 70 second capped-profile window and showed `later_peel_ms` around 5.4-8.0 seconds.
+- `SKIRTGPU_BATCH_SCATTER_PEEL_DIRECT=0|1`: control the direct HG scattering peel-off batch for
+  supported distant total-only instruments. With no override it is enabled for every scattering
+  round whose parent lifecycle wave contains at least 65536 packets, and disabled for smaller
+  parent waves. Explicit `1` forces it for diagnostics and explicit `0` disables it.
+- `SKIRTGPU_BATCH_SCATTER_PEEL_FUSED=0`: disable the fused Voronoi/table HG
+  observer-luminosity kernel used by the direct path. It is enabled by default whenever direct HG
+  peel-off is selected, computing the phase factor and observer extinction in one GPU pass.
+- `SKIRTGPU_BATCH_SCATTER_PEEL_MULTI_OBSERVER=0`: disable the custom multi-observer fused HG kernel
+  and fall back to one fused launch per exact unique observer. The multi-observer route is enabled
+  by default whenever fused direct HG peel-off is selected.
+- `SKIRTGPU_BATCH_SCATTER_PEEL_DETECTOR_FUSED=0`: disable direct Frame/SED accumulation inside the
+  multi-observer HG kernel and return observer luminosities to the host detector wrappers. This is
+  enabled by default when the direct scattering path is selected. It currently supports total-only
+  broadband Frames and total-only SEDs using disjoint wavelength grids, including circular SED
+  apertures.
+- `SKIRTGPU_BATCH_SCATTER_PEEL=1`: opt into the older generic host-side scattering peel-off batch
+  when the direct HG path is disabled or unsupported. This remains diagnostic.
 - `SKIRTGPU_BATCH_HG_SCATTER=1`: opt into the standalone GPU Henyey-Greenstein random-walk
   scattering direction sampler for the single dust medium, no moving media, unpolarized case. This
   kernel passes the GPU self-test but is off by default because the host-launched per-round wrapper
@@ -278,8 +357,8 @@ packets, so they are part of the production ray-tracing flow rather than a stand
   This exercises the GPU-resident detector add path, but it is diagnostic-only because it increased
   initial peel-off cost on RUN075.
 - `SKIRTGPU_DETECTOR_ACCUMULATOR=1`: opt into a generic detector accumulator after host-side
-  detector key/value preparation. This avoids host `LockFree::add()` for total-only distant
-  frame outputs, but it is still diagnostic while the photon-package loop remains host
+  detector key/value preparation. This avoids host `LockFree::add()` for total-only distant Frame
+  and SED outputs, but it is still diagnostic while the photon-package loop remains host
   orchestrated.
 - `SKIRTGPU_PROFILE_BATCH=1`: print per-chunk timing for the batched forced-scattering path. The
   stage timings are intended for development profiling and are off by default. When the combined
@@ -349,12 +428,65 @@ process to a specific device, and `SKIRTGPU_MAX_DEVICES=<count>` when reserving 
 ## Performance target
 
 The SKIRTGPU target for production galaxy SED/IFU workloads is at least 1000x speedup relative to
-the CPU SKIRT version. Current scalar and setup kernels are stepping stones toward that target;
-meeting it requires batched photon propagation with resident GPU grid, material, source, and
-instrument state so the Monte Carlo loop is not driven packet-by-packet from the CPU.
+the CPU SKIRT version. The supported production scope now has resident batched propagation, grid,
+material, detector state, imported primary-source sampling, and dust-secondary generation. Meeting
+the target still requires lower-overhead survivor scheduling and detector accumulation, broader
+resident material/grid coverage, and removal of runtime CUDA compilation from measured startup.
 
-The current RUN075 checkpoints in this branch are stable but not a 100x or 1000x result. On
-20 June 2026, a single-process two-GPU bounded run on
+The current path is stable and substantially faster, but it is not yet a verified 1000x result. On
+4 September 2026, the promoted two-RTX-5090 defaults completed the matched 6,822,200-primary plus
+6,822,200-secondary `TNG50-1_99_706717_sdss_broadband.ski` photon run in 2.056 seconds (1.747 seconds
+primary and 0.309 seconds secondary), versus 44.622 seconds for 32-thread CPU SKIRT. This is a 21.7x
+photon-shooting speedup. Full simulation time was 6.5 seconds versus 46.4 seconds, or 7.1x, because
+CUDA/NVRTC setup still takes about four seconds. Against the CPU reference, integrated SED totals
+differed by 0.069-0.095%, integrated FITS totals by 0.027-0.136%, and the worst individual FITS-band
+total by 0.607%; every checked value was finite.
+
+The high-packet-count `TNG50-1_99_746970_sdss_broadband.ski` case completed 268,435,456 primary and
+268,435,456 secondary packets with direct same-device primary and dust-secondary initialization,
+direct-device waves, phase-specific feeder limits, sampled high-count observers, precomputed
+Voronoi planes, survivor-fed transport, and tuned transport/detector blocks. Six unprofiled runs
+measured 2.985-3.355 seconds for primary emission, 1.335-1.349 seconds for secondary emission, and
+4.322-4.704 seconds for combined photon shooting. Mean shooting time was 4.430 seconds, or 121.2
+million launched packets per second across both GPUs. Mean end-to-end time was 8.7 seconds. The
+preceding packed source-to-lifecycle path required 24.0 seconds (12.7 plus 11.3 seconds), so the
+current path is 5.42x faster than that GPU implementation. The complete matched 32-thread CPU run
+required 1458.065 seconds of photon shooting (1270.711 seconds primary plus 187.354 seconds
+secondary), giving mean primary, secondary, and combined shooting speedups of 411.4x, 139.6x, and
+329.1x. Reported end-to-end time was 1459 seconds on CPU versus a mean 8.7 seconds on both GPUs, or
+about 167.7x. Against that CPU reference, integrated SED totals differed by 0.0022-0.0376%, individual
+integrated FITS bands differed by at most 0.230%, all checked values were finite, and the convergence
+reports were byte-identical. Reaching 1000x still requires further resident transport/detector
+acceleration and lower startup overhead.
+
+The Voronoi-plane cache reduced profiled transport time by 6.2% for primary packets and 15.5% for
+secondary packets. Feeding compacted survivors back into transport then reduced high-count shooting
+from 5.639 to 5.123 seconds. The next pass reused each dust packet's known launch cell in emission
+peel-off, added a dedicated emission detector, stopped allocating and uploading an all-infinity
+observer-distance array, and exactly rejected final-secondary rays whose sampled optical depth
+exceeded a conservative global or direction-to-box-exit column-density upper bound. The bounded
+no-radiation-field kernel is separate from primary transport so its extra state does not reduce
+primary occupancy. Together these changes reduced mean high-count shooting from 5.123 to 4.430
+seconds. Relative to the preceding promoted GPU output, SED values changed by less than
+3e-8 percent, peak-normalized FITS differences were below 5.1e-6 percent, all FITS values remained
+finite, and convergence reports were byte-identical. A custom cell-histogram, prefix-scan, and
+scatter queue was also tested:
+cell ordering helped fixed-observer traversal but hurt random-direction transport, and an alternating
+repeat measured 5.202 seconds with detector-only cell ordering versus 5.120 seconds without it. The
+cell-binned queue therefore remains unpromoted.
+
+A follow-up extended the Voronoi-plane cache to detector rays, reused the initial-cell lookup for
+direct imported-primary packets, and omitted scattering-count storage when `minScattEvents` is zero.
+Three additional unprofiled 536.9-million-packet runs measured 3.038-3.159 seconds for primary,
+1.342-1.354 seconds for secondary, and 4.386-4.501 seconds for combined shooting, with a 4.434-second
+mean. This confirms the 329x combined shooting result within run variance. Integrated SED totals
+again differed from CPU by 0.0022-0.0376%, individual integrated FITS bands by at most 0.230%, all
+checked values were finite, and the convergence report was byte-identical. An observer-major cache
+of reciprocal detector plane-direction dot products was rejected: it increased profiled primary
+detector time from 997 ms to 1178 ms and primary emission-accounted work from 849 ms to 949 ms because
+the extra global-memory traffic outweighed the saved divides.
+
+For historical comparison, on 20 June 2026, a single-process two-GPU bounded run on
 `RUNs_snap_075_cfhtmegacam_sdss_z005.ski` advanced 6.9% of 114,032,000 primary photon packets
 before a 65 second timeout, after about 6.8 seconds of setup. The default chunk for this run was
 65536 packets. A 32768-packet two-GPU run advanced 5.1%, and the same sampled-resident path pinned
@@ -503,23 +635,42 @@ of the scalar host path. After the scatter-peel diagnostic scratch-buffer change
 smoke completed again in 43.4 seconds with primary emission at 28.7 seconds and secondary emission
 at 9.8 seconds, confirming the promoted default path still completes final FITS and SED output.
 
+The 4 September 2026 most-massive-TNG50 test exposed two large-source failures that smaller
+benchmarks could not reach. Snapshot 89, subfind 0 has 598,527 imported stellar particles and
+6,573 source wavelengths, requiring about 29.3 GiB per GPU for float PDF and CDF tables. Oversized
+imported-source PDFs are now packed as bfloat16 while CDFs remain float, reducing these tables to
+about 22.0 GiB without reducing the PDF exponent range. The runtime loader also now prefers the
+64-bit CUDA `_v2` memory symbols: resolving the legacy symbol first had silently truncated every
+allocation above 4 GiB. The float and bfloat16 launch paths pass `skirtgpu -G`. A 10-million-primary
+plus 10-million-secondary validation used both RTX 5090s, completed photon shooting in 29.4 seconds,
+and kept all 20 FITS image bands finite; integrated band fluxes differed by at most 0.52 percent
+from GPU transport with CPU source sampling. The requested production test then completed one
+billion primary plus one billion secondary packets in 120 seconds of photon shooting (104 seconds
+primary and 15.9 seconds secondary), or 128 seconds end to end. Its four `5 x 318 x 318` FITS cubes
+were finite and agreed with the 10-million validation to within 0.56 percent in integrated band
+flux. The retained 10-million CPU shooting time of 38.6 seconds projects to about 32 times slower
+at one billion packets; this is not a direct billion-packet CPU measurement and remains well below
+the 1000x production target.
+
 ## Remaining parity work
 
-- Batch photon packets so path generation, optical-depth accumulation, radiation-field storage,
-  interaction-point selection, scattering peel-off, local-perspective instrument peel-off, and later
-  propagation rounds can run with high GPU occupancy.
-- Replace host-side `SpatialGridPath` reconstruction with a fused resident
-  traversal-plus-optical-depth kernel. The GPU now uses Voronoi search-grid block lists for
-  initial-cell lookup and can fuse dust-table optical-depth accumulation into compact path output,
-  but the path is still copied back to the CPU and used as the compatibility boundary for
-  radiation-field preparation, forced-propagation, detector peel-off, and later lifecycle stages.
-- Replace the experimental batched-round controller with a device-resident packet queue that keeps
-  packet state, random streams, path data, forced propagation, and termination decisions on the GPU
-  while preserving CPU-identical histories.
-- Move the imported-source launch cache into the future device-resident photon-packet pipeline;
-  BC03/MAPPINGS wavelength sampling and isotropic direction conversion have batch GPU primitives,
-  and packet path-segment buffers are no longer eagerly allocated, but positions, packet state, and
-  propagation are still orchestrated by the CPU.
+- Extend the resident lifecycle beyond the current single constant-section HG dust medium,
+  nonmoving, unpolarized Voronoi, total-only distant Frame/SED scope. Unsupported grids, materials,
+  moving media, polarization, local instruments, and component/statistics outputs still use the
+  prepared-path or scalar compatibility paths.
+- Extend direct source-to-resident initialization beyond imported BC03/MAPPINGS primary sources and
+  the current single-dust Voronoi secondary source. Unsupported primary source types, gas emission,
+  multiple dust media, shared cell-library entries, and nonlogarithmic wavelength bias still use the
+  packed or scalar launch paths.
+- Replace the host-controlled resident round loop with a divergence-aware persistent work queue that
+  keeps random streams and survivor scheduling on the GPU while preserving statistically equivalent
+  histories. Compacted survivors are now reused by subsequent transport rounds; the tested monolithic
+  persistent kernel, 32-round asynchronous groups, and cell-binned detector queue were slower and
+  remain disabled.
+- Keep source PDF/CDF caches resident across emission iterations when their inputs are unchanged.
+  Supported primary and dust-secondary kernels already generate launch states directly in the
+  lifecycle structure-of-arrays buffers, but spectra are still constructed on the CPU before the
+  first launch of each relevant emission segment.
 - Extend grid traversal validation and batching beyond the deterministic single-path diagnostics so
   all built-in grid families are exercised under production-scale photon workloads.
 - Extend material-property evaluation beyond the dust-only constant-section table path to
