@@ -1,0 +1,12 @@
+{
+  "name": "skirtgpu-observatory",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild frontend/app.js --bundle --minify --sourcemap --outfile=static/app.js",
+    "test": "node --test tests/*.test.js",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {"three": "0.186.0"},
+  "devDependencies": {"esbuild": "0.28.2", "@playwright/test": "1.63.0"}
+}

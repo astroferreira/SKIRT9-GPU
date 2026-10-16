@@ -8,6 +8,8 @@
 #include "NR.hpp"
 #include "PhotonPacket.hpp"
 #include "ProbePhotonPacketInterface.hpp"
+#include <cmath>
+#include <limits>
 
 //////////////////////////////////////////////////////////////////////
 
@@ -137,6 +139,60 @@ void SourceSystem::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size
         }
         offset += count;
     }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+bool SourceSystem::launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets) const
+{
+    packetData.clear();
+    if (!numPackets || !_callbackv.empty() || numPackets > std::numeric_limits<size_t>::max() / 8) return false;
+
+    packetData.reserve(8 * numPackets);
+    size_t endHistoryIndex = firstHistoryIndex + numPackets;
+    size_t offset = 0;
+    while (offset != numPackets)
+    {
+        size_t historyIndex = firstHistoryIndex + offset;
+        auto h = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+        size_t sourceEnd = min(endHistoryIndex, _Iv[h + 1]);
+        size_t count = sourceEnd - historyIndex;
+        double weight = _Lv[h] / _Wv[h];
+
+        vector<double> sourceData;
+        if (!_sources[h]->launchBatchData(sourceData, historyIndex, count, _Lpp * weight)
+            || sourceData.size() != 8 * count)
+        {
+            packetData.clear();
+            return false;
+        }
+        packetData.insert(packetData.end(), sourceData.begin(), sourceData.end());
+        offset += count;
+    }
+    return packetData.size() == 8 * numPackets;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+bool SourceSystem::gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData, double& luminosityPerPacket,
+                                       size_t firstHistoryIndex, size_t numPackets) const
+{
+    sourceData = nullptr;
+    luminosityPerPacket = 0.;
+    if (!numPackets || !_callbackv.empty() || _Iv.size() < 2
+        || firstHistoryIndex > std::numeric_limits<size_t>::max() - numPackets)
+        return false;
+
+    size_t h = static_cast<size_t>(std::upper_bound(_Iv.cbegin(), _Iv.cend(), firstHistoryIndex) - _Iv.cbegin() - 1);
+    if (h >= _sources.size() || firstHistoryIndex > std::numeric_limits<size_t>::max() - numPackets
+        || firstHistoryIndex + numPackets > _Iv[h + 1])
+        return false;
+    sourceData = _sources[h]->gpuSourceLaunchData();
+    if (!sourceData) return false;
+
+    double weight = _Lv[h] / _Wv[h];
+    luminosityPerPacket = _Lpp * weight;
+    return std::isfinite(luminosityPerPacket) && luminosityPerPacket > 0.;
 }
 
 //////////////////////////////////////////////////////////////////////

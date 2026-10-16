@@ -7,6 +7,7 @@
 #define SEDFAMILY_HPP
 
 #include "Array.hpp"
+#include "GpuSourceSpectrumTable.hpp"
 #include "Range.hpp"
 #include "SimulationItem.hpp"
 #include "SnapshotParameter.hpp"
@@ -67,6 +68,13 @@ public:
         (void)numEntities;
         return false;
     }
+
+    /** This function optionally exposes the stored table and the non-wavelength interpolation
+        parameters for a batch of source entities. Overall mass or star-formation-rate scales are
+        omitted because they do not affect normalized spectral distributions. Implementations
+        reset \em table and return false when the family or parameter layout is unsupported. */
+    virtual bool gpuSpectrumTable(GpuSourceSpectrumTable& table, const vector<double>& flattenedParameters,
+                                  size_t numEntities) const;
 
     /** This function optionally samples wavelengths and evaluates the corresponding normalized
         specific luminosities for a batch of parameter vectors. The \em flattenedParameters vector

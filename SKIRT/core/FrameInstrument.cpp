@@ -5,6 +5,7 @@
 
 #include "FrameInstrument.hpp"
 #include "FluxRecorder.hpp"
+#include "GpuDetectorInfo.hpp"
 #include "PhotonPacket.hpp"
 
 ////////////////////////////////////////////////////////////////////
@@ -67,6 +68,26 @@ bool FrameInstrument::detectTotalBatch(const vector<Position>& positionv, const 
 
 ////////////////////////////////////////////////////////////////////
 
+bool FrameInstrument::getGpuDetectorInfo(GpuFrameDetectorInfo& info)
+{
+    if (!instrumentFluxRecorder()->getGpuFrameDetectorInfo(info)) return false;
+    info.costheta = _costheta;
+    info.sintheta = _sintheta;
+    info.cosphi = _cosphi;
+    info.sinphi = _sinphi;
+    info.cosomega = _cosomega;
+    info.sinomega = _sinomega;
+    info.numPixelsX = _Nxp;
+    info.numPixelsY = _Nyp;
+    info.xpmin = _xpmin;
+    info.xpsiz = _xpsiz;
+    info.ypmin = _ypmin;
+    info.ypsiz = _ypsiz;
+    return info.numPixelsInFrame == static_cast<size_t>(_Nxp) * static_cast<size_t>(_Nyp);
+}
+
+////////////////////////////////////////////////////////////////////
+
 bool FrameInstrument::supportsHenyeyGreensteinScatteringFrameBandBatch()
 {
     return instrumentFluxRecorder()->supportsHenyeyGreensteinScatteringFrameBandBatch();
@@ -81,15 +102,14 @@ bool FrameInstrument::supportsObservedFrameBandBatch()
 
 ////////////////////////////////////////////////////////////////////
 
-bool FrameInstrument::detectObservedFrameBandBatch(const vector<Position>& positionv,
-                                                  const vector<double>& wavelengthv,
-                                                  const vector<double>& luminosityv)
+bool FrameInstrument::detectObservedFrameBandBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                                                   const vector<double>& luminosityv, vector<double>* tauOutv)
 {
     if (positionv.empty()) return false;
     Direction bfkobs = this->bfkobs(positionv.front());
     return instrumentFluxRecorder()->detectObservedFrameBandBatch(
-        positionv, wavelengthv, luminosityv, bfkobs, _costheta, _sintheta, _cosphi, _sinphi,
-        _cosomega, _sinomega, _Nxp, _Nyp, _xpmin, _xpsiz, _ypmin, _ypsiz);
+        positionv, wavelengthv, luminosityv, bfkobs, _costheta, _sintheta, _cosphi, _sinphi, _cosomega, _sinomega, _Nxp,
+        _Nyp, _xpmin, _xpsiz, _ypmin, _ypsiz, tauOutv);
 }
 
 ////////////////////////////////////////////////////////////////////

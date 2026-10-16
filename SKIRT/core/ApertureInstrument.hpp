@@ -42,6 +42,10 @@ protected:
         configured radius, or if that radius is zero. Otherwise, it returns false. */
     bool isInsideAperture(PhotonPacket* pp) const;
 
+    /** This function returns true if the specified model position is inside the configured radius,
+        or if that radius is zero. Otherwise, it returns false. */
+    bool isInsideAperture(const Position& bfr) const;
+
     //======================== Data Members ========================
 
 private:

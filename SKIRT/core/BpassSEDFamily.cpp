@@ -5,6 +5,7 @@
 
 #include "BpassSEDFamily.hpp"
 #include "Constants.hpp"
+#include "GpuAcceleration.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
@@ -70,6 +71,54 @@ double BpassSEDFamily::cdf(Array& lambdav, Array& pv, Array& Pv, const Range& wa
     double t = parameters[2] / Constants::year();
 
     return M * _table.cdf(lambdav, pv, Pv, wavelengthRange, Z, t);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool BpassSEDFamily::cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                            const vector<double>& flattenedParameters, size_t numEntities) const
+{
+    if (!numEntities || flattenedParameters.size() / 3 != numEntities
+        || flattenedParameters.size() % 3) return false;
+
+    vector<double> parameters(2 * numEntities), scales(numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        scales[m] = flattenedParameters[3 * m] / Constants::Msun();
+        parameters[2 * m] = flattenedParameters[3 * m + 1];
+        parameters[2 * m + 1] = flattenedParameters[3 * m + 2] / Constants::year();
+    }
+    vector<const double*> axes{_table.axisData<0>(), _table.axisData<1>(), _table.axisData<2>()};
+    vector<size_t> sizes{_table.axisSize<0>(), _table.axisSize<1>(), _table.axisSize<2>()};
+    vector<bool> logarithmic{_table.axisIsLog<0>(), _table.axisIsLog<1>(), _table.axisIsLog<2>()};
+    return GpuAcceleration::storedTableCdf(luminosities, 3, axes, sizes, logarithmic, _table.quantityDataRaw(),
+                                          _table.quantityStep(), _table.quantityIsLog(), _table.clampsFirstAxis(),
+                                          wavelengthRange.min(), wavelengthRange.max(), parameters, scales, numEntities);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool BpassSEDFamily::gpuSpectrumTable(GpuSourceSpectrumTable& table,
+                                      const vector<double>& flattenedParameters, size_t numEntities) const
+{
+    table = GpuSourceSpectrumTable();
+    if (!numEntities || flattenedParameters.size() / 3 != numEntities || flattenedParameters.size() % 3)
+        return false;
+
+    table.axes = {_table.axisData<0>(), _table.axisData<1>(), _table.axisData<2>()};
+    table.axisSizes = {_table.axisSize<0>(), _table.axisSize<1>(), _table.axisSize<2>()};
+    table.axisLog = {_table.axisIsLog<0>(), _table.axisIsLog<1>(), _table.axisIsLog<2>()};
+    table.values = _table.quantityDataRaw();
+    table.quantityStride = _table.quantityStep();
+    table.quantityLog = _table.quantityIsLog();
+    table.clampWavelength = _table.clampsFirstAxis();
+    table.parameters.resize(2 * numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        table.parameters[2 * m] = flattenedParameters[3 * m + 1];
+        table.parameters[2 * m + 1] = flattenedParameters[3 * m + 2] / Constants::year();
+    }
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////

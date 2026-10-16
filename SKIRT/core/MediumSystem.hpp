@@ -22,6 +22,9 @@
 #include "SpatialGrid.hpp"
 #include "Table.hpp"
 class Configuration;
+struct GpuFrameDetectorInfo;
+struct GpuSourceLaunchData;
+struct GpuSedDetectorInfo;
 class MaterialState;
 class PhotonPacket;
 class Position;
@@ -467,17 +470,18 @@ public:
 	        a shared direction, project the resulting luminosities onto a distant frame detector,
 	        evaluate band transmissions, and accumulate into a persistent GPU accumulator. It returns
 	        false before accumulation if no supported GPU-backed path is available. */
-	    bool observedFrameBandAccumulate(
-	        const vector<Position>& positionv, const vector<double>& lambdav,
-	        const vector<double>& luminosityv, Direction bfkobs, const vector<double>& distancev,
-	        const void* accumulatorKey, size_t numAccumulatorValues, double costheta, double sintheta,
-	        double cosphi, double sinphi, double cosomega, double sinomega, int numPixelsX,
-	        int numPixelsY, double xpmin, double xpsiz, double ypmin, double ypsiz,
-	        double redshift, size_t numPixelsInFrame, const vector<int>& bandOffsetv,
-	        const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
-	        const vector<double>& bandWidthv) const;
+            bool observedFrameBandAccumulate(const vector<Position>& positionv, const vector<double>& lambdav,
+                                             const vector<double>& luminosityv, Direction bfkobs,
+                                             const vector<double>& distancev, const void* accumulatorKey,
+                                             size_t numAccumulatorValues, double costheta, double sintheta,
+                                             double cosphi, double sinphi, double cosomega, double sinomega,
+                                             int numPixelsX, int numPixelsY, double xpmin, double xpsiz, double ypmin,
+                                             double ypsiz, double redshift, size_t numPixelsInFrame,
+                                             const vector<int>& bandOffsetv, const vector<double>& bandWavelengthv,
+                                             const vector<double>& bandTransmissionv, const vector<double>& bandWidthv,
+                                             vector<double>* tauOutv = nullptr) const;
 
-	    /** This function calculates the relative weights of the medium components in a scattering
+            /** This function calculates the relative weights of the medium components in a scattering
         event, determined by the scattering opacity \f$k_{m,h}^\text{sca}\f$ of the medium
         component \f$h\f$ in the scattering interaction cell \f$m\f$ obtained from the specified
         photon packet. These opacities are calculated at the specified wavelength (which is assumed
@@ -490,21 +494,20 @@ public:
         simulation). The function returns true if normalized weights have been successfully
         calculated, and false if all of the weights are zero (i.e. the photon packet does not
         scatter in this cell). */
-    bool weightsForScattering(ShortArray& wv, double lambda, const PhotonPacket* pp) const;
+            bool weightsForScattering(ShortArray& wv, double lambda, const PhotonPacket* pp) const;
 
-    /** This function returns true if the medium configuration supports the direct GPU
+            /** This function returns true if the medium configuration supports the direct GPU
         Henyey-Greenstein scattering peel-off shortcut for total-only distant frame instruments.
         This intentionally covers only the single dust medium, no moving media case. */
-    bool supportsSingleHenyeyGreensteinScatteringPeelOff() const;
+            bool supportsSingleHenyeyGreensteinScatteringPeelOff() const;
 
-    /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
+            /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
         batch of photon packets observed along the specified direction. The output luminosities
         correspond to the peel-off photon packets before extinction to the observer. */
-    bool henyeyGreensteinScatteringLuminosities(const vector<PhotonPacket*>& ppv,
-                                                const vector<double>& lambdav,
-                                                Direction bfkobs, vector<double>& luminosityv) const;
+            bool henyeyGreensteinScatteringLuminosities(const vector<PhotonPacket*>& ppv, const vector<double>& lambdav,
+                                                        Direction bfkobs, vector<double>& luminosityv) const;
 
-    /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
+            /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
         batch of photon packets observed along the specified direction, including extinction to
         the observer. The output luminosities are ready for total-frame detection with zero
         additional observed optical depth. */
@@ -515,11 +518,58 @@ public:
 	                                                        const vector<double>& distancev,
 	                                                        vector<double>& luminosityv) const;
 
-	    /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
+            /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for
+	    multiple distant observer directions in one GPU pass. The output is observer-major with one
+	    contiguous packet block per observer. */
+            bool henyeyGreensteinScatteringObservedLuminosities(
+                const vector<PhotonPacket*>& ppv, const vector<Position>& positionv, const vector<double>& lambdav,
+                const vector<Direction>& bfkobsv, const vector<double>& distancev, vector<double>& luminosityv) const;
+
+            /** This function traces direct Henyey-Greenstein scattering peel-off rays for multiple
+        observers and accumulates matching total-only Frame and SED detector contributions in
+        persistent GPU accumulators. */
+            bool henyeyGreensteinScatteringDetectorAccumulate(const vector<PhotonPacket*>& ppv,
+                                                              const vector<Position>& positionv,
+                                                              const vector<double>& lambdav,
+                                                              const vector<Direction>& bfkobsv,
+                                                              const vector<double>& distancev,
+                                                              const vector<GpuFrameDetectorInfo>& frameDetectorv,
+                                                              const vector<GpuSedDetectorInfo>& sedDetectorv) const;
+
+            /** This function attempts to process complete forced-scattering lifecycles while all
+        packet state remains on the GPU. It covers the same single HG medium and total-only distant
+        detectors as henyeyGreensteinScatteringDetectorAccumulate(). */
+            bool runHenyeyGreensteinScatteringLifeCycles(
+                const vector<PhotonPacket*>& ppv, const vector<int>& wavelengthBinv, int numWavelengths,
+                double pathLengthBias, double minWeightReduction, int minScattEvents,
+                const vector<Direction>& bfkobsv, const vector<GpuFrameDetectorInfo>& frameDetectorv,
+                const vector<GpuSedDetectorInfo>& sedDetectorv, bool primary, bool storeRadiationField,
+                size_t& propagationRounds) const;
+
+            /** This function runs the same resident lifecycle directly from packed source-launch
+        states, avoiding construction of transient PhotonPacket objects. */
+            bool runHenyeyGreensteinScatteringLifeCyclesFromPackedSource(
+                const vector<double>& packetData, size_t firstHistoryIndex, const vector<int>& wavelengthBinv,
+                int numWavelengths, double pathLengthBias, double minWeightReduction, int minScattEvents,
+                const vector<Direction>& bfkobsv, const vector<GpuFrameDetectorInfo>& frameDetectorv,
+                const vector<GpuSedDetectorInfo>& sedDetectorv, bool primary, bool storeRadiationField,
+                size_t& propagationRounds) const;
+
+            /** Generates packets from a prepared source directly into resident device state and runs
+        their complete supported Henyey-Greenstein lifecycles on that same device. */
+            bool runHenyeyGreensteinScatteringLifeCyclesFromGpuSource(
+                const GpuSourceLaunchData& source, size_t firstHistoryIndex, size_t numPackets,
+                double luminosityPerPacket, double pathLengthBias, double minWeightReduction,
+                int minScattEvents, const vector<Direction>& bfkobsv,
+                const vector<GpuFrameDetectorInfo>& frameDetectorv,
+                const vector<GpuSedDetectorInfo>& sedDetectorv, bool storeRadiationField,
+                bool primary, size_t& propagationRounds) const;
+
+            /** This function calculates direct Henyey-Greenstein scattering peel-off luminosities for a
 	        batch of photon packets, includes extinction to the observer, projects onto a distant
 	        frame detector, evaluates band transmissions, and accumulates the total-frame detector
 	        contributions into a persistent GPU accumulator. */
-	    bool henyeyGreensteinScatteringFrameBandAccumulate(
+            bool henyeyGreensteinScatteringFrameBandAccumulate(
 	        const vector<PhotonPacket*>& ppv, const vector<Position>& positionv,
 	        const vector<double>& lambdav, Direction bfkobs, const vector<double>& distancev,
 	        const void* accumulatorKey, size_t numAccumulatorValues, double costheta, double sintheta,

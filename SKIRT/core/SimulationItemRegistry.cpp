@@ -103,6 +103,7 @@
 #include "FullInstrument.hpp"
 #include "GammaGeometry.hpp"
 #include "GaussianGeometry.hpp"
+#include "GaussianLineSEDFamily.hpp"
 #include "GeometricMedium.hpp"
 #include "GeometricSource.hpp"
 #include "GrainPopulation.hpp"
@@ -399,6 +400,7 @@ SimulationItemRegistry::SimulationItemRegistry(string version, string format)
     ItemRegistry::add<FileIndexedSEDFamily>();
     ItemRegistry::add<MappingsSEDFamily>();
     ItemRegistry::add<ToddlersSEDFamily>();
+    ItemRegistry::add<GaussianLineSEDFamily>();
     ItemRegistry::add<SpinFlipSEDFamily>();
     ItemRegistry::add<LyaGaussianSEDFamily>();
     ItemRegistry::add<LyaDoublePeakedSEDFamily>();

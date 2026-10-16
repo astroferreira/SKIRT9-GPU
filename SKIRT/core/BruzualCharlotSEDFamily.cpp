@@ -95,6 +95,32 @@ bool BruzualCharlotSEDFamily::cdfBatch(vector<double>& luminosities, const Range
 
 ////////////////////////////////////////////////////////////////////
 
+bool BruzualCharlotSEDFamily::gpuSpectrumTable(GpuSourceSpectrumTable& table,
+                                               const vector<double>& flattenedParameters,
+                                               size_t numEntities) const
+{
+    table = GpuSourceSpectrumTable();
+    if (!numEntities || flattenedParameters.size() / 3 != numEntities || flattenedParameters.size() % 3)
+        return false;
+
+    table.axes = {_table.axisData<0>(), _table.axisData<1>(), _table.axisData<2>()};
+    table.axisSizes = {_table.axisSize<0>(), _table.axisSize<1>(), _table.axisSize<2>()};
+    table.axisLog = {_table.axisIsLog<0>(), _table.axisIsLog<1>(), _table.axisIsLog<2>()};
+    table.values = _table.quantityDataRaw();
+    table.quantityStride = _table.quantityStep();
+    table.quantityLog = _table.quantityIsLog();
+    table.clampWavelength = _table.clampsFirstAxis();
+    table.parameters.resize(2 * numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        table.parameters[2 * m] = flattenedParameters[3 * m + 1];
+        table.parameters[2 * m + 1] = flattenedParameters[3 * m + 2] / Constants::year();
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
 bool BruzualCharlotSEDFamily::sampleWavelengthBatch(vector<double>& wavelengths,
                                                     vector<double>& specificLuminosities,
                                                     const Range& wavelengthRange,

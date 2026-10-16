@@ -477,6 +477,14 @@ Array MultiGrainDustMix::emissivity(const Array& Jv) const
 
 ////////////////////////////////////////////////////////////////////
 
+bool MultiGrainDustMix::emissivityBatch(const vector<double>& radiationFields, size_t numCells,
+                                      vector<double>& spectra) const
+{
+    return _stochastic && _calcSt.emissivityBatch(radiationFields, numCells, spectra);
+}
+
+////////////////////////////////////////////////////////////////////
+
 int MultiGrainDustMix::numPopulations() const
 {
     return _populations.size();

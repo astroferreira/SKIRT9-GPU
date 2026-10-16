@@ -7,6 +7,7 @@
 #define DUSTSECONDARYSOURCE_HPP
 
 #include "Array.hpp"
+#include "GpuSourceLaunchData.hpp"
 #include "SecondarySource.hpp"
 class Configuration;
 class MediumSystem;
@@ -76,10 +77,18 @@ public:
         ranges once instead of locating the launch cell separately for every packet. */
     void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const override;
 
+    /** This function generates packed launch states without retaining a PhotonPacket per history. */
+    bool launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets,
+                         double L) const override;
+
+    /** This function returns prepared dust-cell metadata for direct resident GPU launch. */
+    const GpuSourceLaunchData* gpuSourceLaunchData() const override;
+
     //======================== Data Members ========================
 
 private:
     void launchFromCell(PhotonPacket* pp, size_t historyIndex, double L, int p, int m) const;
+    bool prepareGpuSourceLaunchData();
 
     // initialized by prepareLuminosities() and preparePacketMap()
     Configuration* _config{nullptr};
@@ -90,6 +99,8 @@ private:
     vector<int> _nv;     // the library entry index corresponding to each spatial cell (i.e. map from cells to entries)
     vector<int> _mv;     // the spatial cell indices sorted so that cells belonging to the same entry are consecutive
     vector<size_t> _Iv;  // first history index allocated to each spatial cell (with extra entry at the end)
+    GpuSourceLaunchData _gpuSourceLaunchData;
+    bool _hasGpuSourceLaunchData{false};
 };
 
 ////////////////////////////////////////////////////////////////

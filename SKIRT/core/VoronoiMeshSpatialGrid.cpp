@@ -255,6 +255,21 @@ double VoronoiMeshSpatialGrid::traversalEpsilon() const
     return _mesh->traversalEpsilon();
 }
 
+////////////////////////////////////////////////////////////////////
+
+vector<double> VoronoiMeshSpatialGrid::gpuCellExtentCoordinates() const
+{
+    vector<double> result;
+    int count = numCells();
+    result.reserve(6 * static_cast<size_t>(count));
+    for (int m = 0; m != count; ++m)
+    {
+        Box box = _mesh->extent(m);
+        result.insert(result.end(), {box.xmin(), box.ymin(), box.zmin(), box.xmax(), box.ymax(), box.zmax()});
+    }
+    return result;
+}
+
 //////////////////////////////////////////////////////////////////////
 
 void VoronoiMeshSpatialGrid::writeGridPlotFiles(const SimulationItem* probe) const

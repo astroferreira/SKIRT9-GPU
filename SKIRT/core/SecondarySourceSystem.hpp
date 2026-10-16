@@ -11,6 +11,7 @@
 class SecondarySource;
 class PhotonPacket;
 class ProbePhotonPacketInterface;
+struct GpuSourceLaunchData;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -216,6 +217,15 @@ public:
     /** This function launches a contiguous batch of photon packets from the configured secondary
         sources, preserving the same source mapping and callbacks as launch(). */
     void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets) const;
+
+    /** This function attempts to generate packed launch states without retaining a PhotonPacket
+        object for every history. */
+    bool launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets) const;
+
+    /** This function exposes one prepared source covering the requested history range for direct
+        resident GPU launch. */
+    bool gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData, double& luminosityPerPacket,
+                             size_t firstHistoryIndex, size_t numPackets) const;
 
     //======================== Data Members ========================
 

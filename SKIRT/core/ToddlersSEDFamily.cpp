@@ -5,6 +5,7 @@
 
 #include "ToddlersSEDFamily.hpp"
 #include "Constants.hpp"
+#include "GpuAcceleration.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
@@ -165,6 +166,62 @@ double ToddlersSEDFamily::cdf(Array& lambdav, Array& pv, Array& Pv, const Range&
         // Use 4D table
         return sfr * _sfrNormalizedTable.cdf(lambdav, pv, Pv, wavelengthRange, Z, SFE, n_cl);
     }
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool ToddlersSEDFamily::cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                               const vector<double>& flattenedParameters, size_t numEntities) const
+{
+    if (_sedMode != SedMode::SFRNormalized || !numEntities
+        || flattenedParameters.size() / 4 != numEntities || flattenedParameters.size() % 4) return false;
+
+    vector<double> parameters(3 * numEntities), scales(numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        parameters[3 * m] = flattenedParameters[4 * m];
+        parameters[3 * m + 1] = flattenedParameters[4 * m + 1];
+        parameters[3 * m + 2] = flattenedParameters[4 * m + 2] / 1e6;
+        scales[m] = flattenedParameters[4 * m + 3] / Constants::Msun() * Constants::year();
+    }
+    const auto& table = _sfrNormalizedTable;
+    vector<const double*> axes{table.axisData<0>(), table.axisData<1>(), table.axisData<2>(), table.axisData<3>()};
+    vector<size_t> sizes{table.axisSize<0>(), table.axisSize<1>(), table.axisSize<2>(), table.axisSize<3>()};
+    vector<bool> logarithmic{table.axisIsLog<0>(), table.axisIsLog<1>(), table.axisIsLog<2>(), table.axisIsLog<3>()};
+    return GpuAcceleration::storedTableCdf(luminosities, 4, axes, sizes, logarithmic, table.quantityDataRaw(),
+                                          table.quantityStep(), table.quantityIsLog(), table.clampsFirstAxis(),
+                                          wavelengthRange.min(), wavelengthRange.max(), parameters, scales, numEntities);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool ToddlersSEDFamily::gpuSpectrumTable(GpuSourceSpectrumTable& table,
+                                         const vector<double>& flattenedParameters, size_t numEntities) const
+{
+    table = GpuSourceSpectrumTable();
+    if (_sedMode != SedMode::SFRNormalized || !numEntities
+        || flattenedParameters.size() / 4 != numEntities || flattenedParameters.size() % 4)
+        return false;
+
+    const auto& sourceTable = _sfrNormalizedTable;
+    table.axes = {sourceTable.axisData<0>(), sourceTable.axisData<1>(), sourceTable.axisData<2>(),
+                  sourceTable.axisData<3>()};
+    table.axisSizes = {sourceTable.axisSize<0>(), sourceTable.axisSize<1>(), sourceTable.axisSize<2>(),
+                       sourceTable.axisSize<3>()};
+    table.axisLog = {sourceTable.axisIsLog<0>(), sourceTable.axisIsLog<1>(), sourceTable.axisIsLog<2>(),
+                     sourceTable.axisIsLog<3>()};
+    table.values = sourceTable.quantityDataRaw();
+    table.quantityStride = sourceTable.quantityStep();
+    table.quantityLog = sourceTable.quantityIsLog();
+    table.clampWavelength = sourceTable.clampsFirstAxis();
+    table.parameters.resize(3 * numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        table.parameters[3 * m] = flattenedParameters[4 * m];
+        table.parameters[3 * m + 1] = flattenedParameters[4 * m + 1];
+        table.parameters[3 * m + 2] = flattenedParameters[4 * m + 2] / 1e6;
+    }
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////

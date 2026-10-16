@@ -7,11 +7,14 @@
 #include "DistantInstrument.hpp"
 #include "FrameInstrument.hpp"
 #include "GpuAcceleration.hpp"
+#include "GpuDetectorInfo.hpp"
 #include "Log.hpp"
+#include "MediumSystem.hpp"
 #include "Parallel.hpp"
 #include "ParallelFactory.hpp"
 #include "PhotonPacket.hpp"
 #include "ProcessManager.hpp"
+#include "SEDInstrument.hpp"
 #include "SecondarySourceSystem.hpp"
 #include "ShortArray.hpp"
 #include "SpecialFunctions.hpp"
@@ -65,14 +68,142 @@ namespace
         return end != text && value >= 0 ? static_cast<int>(value) : fallback;
     }
 
-    int lifeCycleThreadLimit(const Configuration* config)
+    int lifeCycleThreadLimit(const Configuration* config, size_t numPackets, bool secondary,
+                             bool directDeviceSource = false)
     {
         if (!config || !environmentFlag("SKIRTGPU_BATCH_FIRST_FORCED", true) || !config->hasMedium()
             || !config->forceScattering() || !GpuAcceleration::isProcessEnabled()
             || !environmentFlag("SKIRTGPU_LIMIT_LIFECYCLE_THREADS", true))
             return 0;
 
-        return environmentThreadValue("SKIRTGPU_LIFECYCLE_THREADS", 0);
+        const char* phaseVariable = secondary ? "SKIRTGPU_SECONDARY_LIFECYCLE_THREADS"
+                                              : "SKIRTGPU_PRIMARY_LIFECYCLE_THREADS";
+        if (std::getenv(phaseVariable)) return environmentThreadValue(phaseVariable, 0);
+        if (std::getenv("SKIRTGPU_LIFECYCLE_THREADS"))
+            return environmentThreadValue("SKIRTGPU_LIFECYCLE_THREADS", 0);
+
+        constexpr int defaultPrimaryGpuFeederThreads = 6;
+        constexpr int defaultDirectSecondaryGpuFeederThreads = 4;
+        constexpr int defaultPackedSecondaryGpuFeederThreads = 12;
+        constexpr size_t minimumPacketsForGpuFeederLimit = 4194304;
+        if (numPackets < minimumPacketsForGpuFeederLimit) return 0;
+        if (!secondary) return defaultPrimaryGpuFeederThreads;
+        return directDeviceSource ? defaultDirectSecondaryGpuFeederThreads : defaultPackedSecondaryGpuFeederThreads;
+    }
+
+    bool hasDirectSecondaryGpuSource(const SecondarySourceSystem* sourceSystem, size_t numPackets)
+    {
+        if (!sourceSystem || !environmentFlag("SKIRTGPU_DEVICE_DUST_SOURCE_LIFECYCLE", true)) return false;
+        const GpuSourceLaunchData* sourceData = nullptr;
+        double luminosityPerPacket = 0.;
+        return sourceSystem->gpuSourceLaunchData(sourceData, luminosityPerPacket, 0, numPackets);
+    }
+
+    size_t matchingDistantObserverIndex(const vector<Instrument*>& observers, const Instrument* instrument)
+    {
+        auto distant = dynamic_cast<const DistantInstrument*>(instrument);
+        if (!distant) return observers.size();
+
+        for (size_t index = 0; index != observers.size(); ++index)
+        {
+            auto other = dynamic_cast<const DistantInstrument*>(observers[index]);
+            if (other && distant->distance() == other->distance() && distant->inclination() == other->inclination()
+                && distant->azimuth() == other->azimuth() && distant->roll() == other->roll())
+                return index;
+        }
+        return observers.size();
+    }
+
+    // Assigns instruments to distant-observer slots for the resident GPU detectors, which accept one Frame and
+    // one SED per slot. Instruments with the same viewpoint share a slot while it has room for their detector
+    // type; a further Frame or SED at that viewpoint (e.g. two cameras with different filter sets) gets an
+    // additional slot with the same direction instead of disabling the resident lifecycle.
+    void assignResidentObserverSlots(const vector<Instrument*>& instruments, vector<Instrument*>& observers,
+                                     vector<size_t>& observerIndexForInstrument)
+    {
+        vector<bool> slotHasFrame, slotHasSed;
+        for (Instrument* instrument : instruments)
+        {
+            bool frame = dynamic_cast<FrameInstrument*>(instrument) != nullptr;
+            bool sed = dynamic_cast<SEDInstrument*>(instrument) != nullptr;
+            auto distant = dynamic_cast<const DistantInstrument*>(instrument);
+            size_t observerIndex = observers.size();
+            for (size_t index = 0; distant && index != observers.size(); ++index)
+            {
+                auto other = dynamic_cast<const DistantInstrument*>(observers[index]);
+                if (other && distant->distance() == other->distance() && distant->inclination() == other->inclination()
+                    && distant->azimuth() == other->azimuth() && distant->roll() == other->roll()
+                    && !(frame && slotHasFrame[index]) && !(sed && slotHasSed[index]))
+                {
+                    observerIndex = index;
+                    break;
+                }
+            }
+            if (observerIndex == observers.size())
+            {
+                observers.push_back(instrument);
+                slotHasFrame.push_back(false);
+                slotHasSed.push_back(false);
+            }
+            if (frame) slotHasFrame[observerIndex] = true;
+            if (sed) slotHasSed[observerIndex] = true;
+            observerIndexForInstrument.push_back(observerIndex);
+        }
+    }
+
+    // A detector-less observer for resident passes without peel-off; the GPU detectors skip it immediately.
+    void assignNullResidentObserver(vector<Direction>& observerDirectionv, vector<GpuFrameDetectorInfo>& frameDetectorv,
+                                    vector<GpuSedDetectorInfo>& sedDetectorv)
+    {
+        observerDirectionv.assign(1, Direction(0., 0.));
+        frameDetectorv.assign(1, GpuFrameDetectorInfo());
+        sedDetectorv.assign(1, GpuSedDetectorInfo());
+    }
+
+    bool observedExtinctionOpticalDepthsForObservers(const MediumSystem* mediumSystem,
+                                                     const vector<Instrument*>& observers,
+                                                     const vector<Position>& positionv, const vector<double>& lambdav,
+                                                     const vector<double>& distancev,
+                                                     vector<vector<double>>& observerTauv)
+    {
+        if (!mediumSystem || observers.empty() || positionv.empty() || lambdav.size() != positionv.size()
+            || distancev.size() != positionv.size()
+            || observers.size() > std::numeric_limits<size_t>::max() / positionv.size())
+            return false;
+
+        size_t numPackets = positionv.size();
+        size_t numRays = observers.size() * numPackets;
+        vector<Position> rayPositionv;
+        vector<Direction> rayDirectionv;
+        vector<double> rayLambdav;
+        vector<double> rayDistancev;
+        rayPositionv.reserve(numRays);
+        rayDirectionv.reserve(numRays);
+        rayLambdav.reserve(numRays);
+        rayDistancev.reserve(numRays);
+        for (Instrument* observer : observers)
+        {
+            Direction direction = observer->bfkobs(positionv.front());
+            rayPositionv.insert(rayPositionv.end(), positionv.begin(), positionv.end());
+            rayLambdav.insert(rayLambdav.end(), lambdav.begin(), lambdav.end());
+            rayDistancev.insert(rayDistancev.end(), distancev.begin(), distancev.end());
+            rayDirectionv.insert(rayDirectionv.end(), numPackets, direction);
+        }
+
+        vector<double> rayTauv;
+        if (!mediumSystem->observedExtinctionOpticalDepths(rayPositionv, rayDirectionv, rayLambdav, rayDistancev,
+                                                           rayTauv)
+            || rayTauv.size() != numRays)
+            return false;
+
+        observerTauv.clear();
+        observerTauv.reserve(observers.size());
+        for (size_t observerIndex = 0; observerIndex != observers.size(); ++observerIndex)
+        {
+            auto begin = rayTauv.begin() + observerIndex * numPackets;
+            observerTauv.emplace_back(begin, begin + numPackets);
+        }
+        return true;
     }
 
     double exponCutoffFromUniform(double xmax, double u)
@@ -192,7 +323,7 @@ void MonteCarloSimulation::runPrimaryEmission()
     {
         initProgress(segment, Npp);
         sourceSystem()->prepareForLaunch(Npp);
-	        auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config));
+        auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config, Npp, false));
         parallel->call(
             Npp, [this](size_t i, size_t n) { performLifeCycle(i, n, true, true, _config->hasRadiationField()); });
         instrumentSystem()->flush();
@@ -231,7 +362,9 @@ void MonteCarloSimulation::runSecondaryEmission()
     else
     {
         initProgress(segment, Npp);
-	        auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config));
+        bool directDeviceSource = hasDirectSecondaryGpuSource(_secondarySourceSystem, Npp);
+        auto parallel = find<ParallelFactory>()->parallelDistributed(
+            lifeCycleThreadLimit(_config, Npp, true, directDeviceSource));
         parallel->call(Npp, [this, storeRF](size_t i, size_t n) { performLifeCycle(i, n, false, true, storeRF); });
         instrumentSystem()->flush();
     }
@@ -338,13 +471,13 @@ void MonteCarloSimulation::runPrimaryEmissionIterations()
     //  - the number of photon packets and the primary source luminosity are guaranteed to be nonzero
     //  - the data structures to store the radiation field are guaranteed to exist
 
-    // get the parallel engine
-	    auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config));
-
     // get the parameters controlling the dynamic state iteration
     size_t Npp = _config->numPrimaryIterationPackets();
     int minIters = _config->minPrimaryIterations();
     int maxIters = _config->maxPrimaryIterations();
+
+    // get the parallel engine
+    auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config, Npp, false));
 
     // prepare the source system for the appropriate number of packets
     sourceSystem()->prepareForLaunch(Npp);
@@ -395,9 +528,6 @@ void MonteCarloSimulation::runSecondaryEmissionIterations()
     //  - the total luminosity of secondary sources may still be zero
     //  - the data structures to store the radiation field are guaranteed to exist
 
-    // get the parallel engine
-	    auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config));
-
     // get the parameters controlling the dynamic secondary emission iteration
     size_t Npp = _config->numSecondaryIterationPackets();
     int minIters = _config->minSecondaryIterations();
@@ -433,6 +563,9 @@ void MonteCarloSimulation::runSecondaryEmissionIterations()
             }
 
             // launch photon packets
+            bool directDeviceSource = hasDirectSecondaryGpuSource(_secondarySourceSystem, Npp);
+            auto parallel = find<ParallelFactory>()->parallelDistributed(
+                lifeCycleThreadLimit(_config, Npp, true, directDeviceSource));
             initProgress(segment, Npp);
             parallel->call(Npp, [this](size_t i, size_t n) { performLifeCycle(i, n, false, false, true); });
             instrumentSystem()->flush();
@@ -467,9 +600,6 @@ void MonteCarloSimulation::runMergedEmissionIterations()
     //  - the total luminosity of secondary sources may still be zero
     //  - the data structures to store the radiation field are guaranteed to exist
 
-    // get the parallel engine
-	    auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config));
-
     // get the parameters controlling the merged iteration
     size_t Npp1 = _config->numPrimaryIterationPackets();
     size_t Npp2 = _config->numSecondaryIterationPackets();
@@ -477,6 +607,10 @@ void MonteCarloSimulation::runMergedEmissionIterations()
     int maxIters = _config->maxSecondaryIterations();
     double fractionOfPrimary = _config->maxFractionOfPrimary();
     double fractionOfPrevious = _config->maxFractionOfPrevious();
+
+    // get the parallel engine
+    auto primaryParallel =
+        find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config, std::max(Npp1, Npp2), false));
 
     // prepare the primary source system for the appropriate number of packets
     sourceSystem()->prepareForLaunch(Npp1);
@@ -504,7 +638,7 @@ void MonteCarloSimulation::runMergedEmissionIterations()
 
             // launch photon packets
             initProgress(segment1, Npp1);
-            parallel->call(Npp1, [this](size_t i, size_t n) { performLifeCycle(i, n, true, false, true); });
+            primaryParallel->call(Npp1, [this](size_t i, size_t n) { performLifeCycle(i, n, true, false, true); });
             instrumentSystem()->flush();
 
             // wait for all processes to finish and synchronize the radiation field
@@ -526,8 +660,12 @@ void MonteCarloSimulation::runMergedEmissionIterations()
             }
 
             // launch photon packets
+            bool directDeviceSource = hasDirectSecondaryGpuSource(_secondarySourceSystem, Npp2);
+            auto secondaryParallel = find<ParallelFactory>()->parallelDistributed(
+                lifeCycleThreadLimit(_config, Npp2, true, directDeviceSource));
             initProgress(segment2, Npp2);
-            parallel->call(Npp2, [this](size_t i, size_t n) { performLifeCycle(i, n, false, false, true); });
+            secondaryParallel->call(Npp2,
+                                    [this](size_t i, size_t n) { performLifeCycle(i, n, false, false, true); });
             instrumentSystem()->flush();
 
             // wait for all processes to finish and synchronize the radiation field
@@ -592,7 +730,7 @@ namespace
     {
         if (config && environmentFlag("SKIRTGPU_BATCH_FIRST_FORCED", true) && config->hasMedium()
             && config->forceScattering() && GpuAcceleration::isProcessEnabled())
-            return environmentSizeValue("SKIRTGPU_BATCH_FIRST_FORCED_CHUNK", 262144);
+            return environmentSizeValue("SKIRTGPU_BATCH_FIRST_FORCED_CHUNK", 8388608);
 
         return logProgressChunkSize;
     }
@@ -728,20 +866,21 @@ bool MonteCarloSimulation::peelOffEmissionBatch(const vector<PhotonPacket*>& ppv
 
     vector<size_t> observerIndexForInstrument;
     vector<vector<PhotonPacket>> observerPeelPackets;
+    vector<Instrument*> observerInstruments;
     observerIndexForInstrument.reserve(instruments.size());
     observerPeelPackets.reserve(instruments.size());
+    observerInstruments.reserve(instruments.size());
 
-    size_t lastObserverIndex = 0;
     for (Instrument* instrument : instruments)
     {
-        if (instrument->isSameObserverAsPreceding())
+        size_t observerIndex = matchingDistantObserverIndex(observerInstruments, instrument);
+        if (observerIndex != observerInstruments.size())
         {
-            if (observerPeelPackets.empty()) return false;
-            observerIndexForInstrument.push_back(lastObserverIndex);
+            observerIndexForInstrument.push_back(observerIndex);
             continue;
         }
 
-        size_t observerIndex = observerPeelPackets.size();
+        observerInstruments.push_back(instrument);
         observerPeelPackets.emplace_back(ppv.size());
         vector<PhotonPacket>& peelPackets = observerPeelPackets.back();
         vector<PhotonPacket*> peelPacketPointers;
@@ -770,7 +909,6 @@ bool MonteCarloSimulation::peelOffEmissionBatch(const vector<PhotonPacket*>& ppv
 
         for (size_t i = 0; i != ppv.size(); ++i) peelPackets[i].setObservedOpticalDepth(tauv[i]);
         observerIndexForInstrument.push_back(observerIndex);
-        lastObserverIndex = observerIndex;
     }
 
     for (size_t i = 0; i != ppv.size(); ++i)
@@ -796,9 +934,17 @@ bool MonteCarloSimulation::peelOffEmissionBatchDirect(const vector<PhotonPacket*
     vector<double> emptyDoublev;
     for (Instrument* instrument : instruments)
     {
-        auto frameInstrument = dynamic_cast<FrameInstrument*>(instrument);
-        if (!frameInstrument) return false;
-        if (!frameInstrument->detectTotalBatch(emptyPositionv, emptyDoublev, emptyDoublev, emptyDoublev))
+        if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instrument))
+        {
+            if (!frameInstrument->detectTotalBatch(emptyPositionv, emptyDoublev, emptyDoublev, emptyDoublev))
+                return false;
+        }
+        else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instrument))
+        {
+            if (!sedInstrument->detectTotalBatch(emptyPositionv, emptyDoublev, emptyDoublev, emptyDoublev))
+                return false;
+        }
+        else
             return false;
     }
 
@@ -819,65 +965,116 @@ bool MonteCarloSimulation::peelOffEmissionBatchDirect(const vector<PhotonPacket*
 
     if (isTruthyEnvironmentFlag("SKIRTGPU_EMISSION_PEEL_FRAME_FUSED"))
     {
-        bool fusedSupported = true;
+        vector<Instrument*> fusedObservers;
+        vector<size_t> fusedObserverIndexForInstrument;
+        fusedObservers.reserve(instruments.size());
+        fusedObserverIndexForInstrument.reserve(instruments.size());
+
         for (Instrument* instrument : instruments)
         {
-            auto frameInstrument = dynamic_cast<FrameInstrument*>(instrument);
-            if (!frameInstrument || !frameInstrument->supportsObservedFrameBandBatch())
+            size_t observerIndex = matchingDistantObserverIndex(fusedObservers, instrument);
+            if (observerIndex == fusedObservers.size()) fusedObservers.push_back(instrument);
+            fusedObserverIndexForInstrument.push_back(observerIndex);
+        }
+
+        bool fusedSupported = true;
+        vector<FrameInstrument*> frameForObserver(fusedObservers.size(), nullptr);
+        vector<bool> sedForObserver(fusedObservers.size(), false);
+        for (size_t instrumentIndex = 0; instrumentIndex != instruments.size(); ++instrumentIndex)
+        {
+            size_t observerIndex = fusedObserverIndexForInstrument[instrumentIndex];
+            if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
+            {
+                if (frameForObserver[observerIndex] || !frameInstrument->supportsObservedFrameBandBatch())
+                {
+                    fusedSupported = false;
+                    break;
+                }
+                frameForObserver[observerIndex] = frameInstrument;
+            }
+            else if (dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+                sedForObserver[observerIndex] = true;
+            else
             {
                 fusedSupported = false;
                 break;
             }
         }
+        for (FrameInstrument* frameInstrument : frameForObserver)
+            if (!frameInstrument) fusedSupported = false;
+
         if (fusedSupported)
         {
             bool fusedDetected = true;
-            for (Instrument* instrument : instruments)
+            vector<vector<double>> fusedObserverTauv(fusedObservers.size());
+            for (size_t observerIndex = 0; observerIndex != fusedObservers.size(); ++observerIndex)
             {
-                auto frameInstrument = dynamic_cast<FrameInstrument*>(instrument);
-                if (!frameInstrument->detectObservedFrameBandBatch(positionv, lambdav, luminosityv))
+                vector<double>* tauOutv = sedForObserver[observerIndex] ? &fusedObserverTauv[observerIndex] : nullptr;
+                if (!frameForObserver[observerIndex]->detectObservedFrameBandBatch(positionv, lambdav, luminosityv,
+                                                                                   tauOutv))
                 {
                     fusedDetected = false;
                     break;
                 }
             }
-            if (fusedDetected) return true;
+            if (fusedDetected)
+            {
+                for (size_t instrumentIndex = 0; instrumentIndex != instruments.size(); ++instrumentIndex)
+                {
+                    auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]);
+                    if (!sedInstrument) continue;
+                    size_t observerIndex = fusedObserverIndexForInstrument[instrumentIndex];
+                    if (!sedInstrument->detectTotalBatch(positionv, lambdav, luminosityv,
+                                                         fusedObserverTauv[observerIndex]))
+                    {
+                        fusedDetected = false;
+                        break;
+                    }
+                }
+                if (fusedDetected) return true;
+            }
         }
     }
 
     vector<size_t> observerIndexForInstrument;
     vector<vector<double>> observerTauv;
+    vector<Instrument*> observerInstruments;
     observerIndexForInstrument.reserve(instruments.size());
     observerTauv.reserve(instruments.size());
+    observerInstruments.reserve(instruments.size());
 
-    vector<double> distancev(ppv.size(), std::numeric_limits<double>::infinity());
-    size_t lastObserverIndex = 0;
     for (Instrument* instrument : instruments)
     {
-        if (instrument->isSameObserverAsPreceding())
+        size_t observerIndex = matchingDistantObserverIndex(observerInstruments, instrument);
+        if (observerIndex != observerInstruments.size())
         {
-            if (observerTauv.empty()) return false;
-            observerIndexForInstrument.push_back(lastObserverIndex);
+            observerIndexForInstrument.push_back(observerIndex);
             continue;
         }
 
-        Direction bfkobs = instrument->bfkobs(positionv.front());
-        vector<double> tauv;
-        if (!mediumSystem()->observedExtinctionOpticalDepths(positionv, bfkobs, lambdav, distancev, tauv)
-            || tauv.size() != ppv.size())
-            return false;
-
-        size_t observerIndex = observerTauv.size();
-        observerTauv.push_back(std::move(tauv));
+        observerInstruments.push_back(instrument);
         observerIndexForInstrument.push_back(observerIndex);
-        lastObserverIndex = observerIndex;
     }
+
+    vector<double> distancev(ppv.size(), std::numeric_limits<double>::infinity());
+    if (!observedExtinctionOpticalDepthsForObservers(mediumSystem(), observerInstruments, positionv, lambdav, distancev,
+                                                     observerTauv))
+        return false;
 
     for (size_t instrumentIndex = 0; instrumentIndex != instruments.size(); ++instrumentIndex)
     {
         size_t observerIndex = observerIndexForInstrument[instrumentIndex];
-        auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]);
-        if (!frameInstrument->detectTotalBatch(positionv, lambdav, luminosityv, observerTauv[observerIndex]))
+        if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
+        {
+            if (!frameInstrument->detectTotalBatch(positionv, lambdav, luminosityv, observerTauv[observerIndex]))
+                return false;
+        }
+        else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+        {
+            if (!sedInstrument->detectTotalBatch(positionv, lambdav, luminosityv, observerTauv[observerIndex]))
+                return false;
+        }
+        else
             return false;
     }
     return true;
@@ -1653,13 +1850,13 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
         || !_config->forceScattering() || !GpuAcceleration::isProcessEnabled() || numIndices < 2)
         return false;
 
-    static std::atomic<size_t> profileBatchCounter{0};
+    static std::atomic<size_t> profileBatchCounter[2];
     bool profileBatch = isTruthyEnvironmentFlag("SKIRTGPU_PROFILE_BATCH");
     size_t profileBatchCall = 0;
     if (profileBatch)
     {
         size_t limit = environmentSizeValue("SKIRTGPU_PROFILE_BATCH_LIMIT", 0);
-        profileBatchCall = profileBatchCounter.fetch_add(1, std::memory_order_relaxed);
+        profileBatchCall = profileBatchCounter[primary ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
         if (limit != 0 && profileBatchCall >= limit) profileBatch = false;
     }
     auto profileStart = std::chrono::steady_clock::now();
@@ -1683,6 +1880,196 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
         bucket += elapsedMilliseconds(profileMark, now);
         profileMark = now;
     };
+
+    size_t residentMinimumPackets = environmentSizeValue("SKIRTGPU_RESIDENT_MIN_PACKETS", 65536);
+    // Radiation-field-only passes (self-absorption iterations, no peel-off) also run resident when the source
+    // initializes packets directly on the GPU, with a single null observer whose detectors have no accumulators
+    // and therefore reject every packet before tracing. SKIRTGPU_RESIDENT_RF_ONLY=0 disables this. The packed
+    // and host-launched variants stay peel-off only: with CPU-launched dust packets they were far slower.
+    bool residentPass = peel || (store && environmentFlag("SKIRTGPU_RESIDENT_RF_ONLY", true));
+    if (residentPass && numIndices >= residentMinimumPackets
+        && environmentFlag("SKIRTGPU_RESIDENT_LIFECYCLE", true)
+        && environmentFlag("SKIRTGPU_PACKED_SOURCE_LIFECYCLE", true) && !_config->needIndividualPeelOff())
+    {
+        auto prepareResidentDetectorMetadata =
+            [this, peel](const Position& referencePosition, vector<Direction>& observerDirectionv,
+                         vector<GpuFrameDetectorInfo>& frameDetectorv, vector<GpuSedDetectorInfo>& sedDetectorv) {
+                if (!peel)
+                {
+                    assignNullResidentObserver(observerDirectionv, frameDetectorv, sedDetectorv);
+                    return true;
+                }
+                const auto& instruments = _instrumentSystem->instruments();
+                vector<Instrument*> observers;
+                vector<size_t> observerIndexForInstrument;
+                observers.reserve(instruments.size());
+                observerIndexForInstrument.reserve(instruments.size());
+                assignResidentObserverSlots(instruments, observers, observerIndexForInstrument);
+
+                observerDirectionv.clear();
+                observerDirectionv.reserve(observers.size());
+                for (Instrument* observer : observers)
+                    observerDirectionv.push_back(observer->bfkobs(referencePosition));
+                frameDetectorv.assign(observers.size(), GpuFrameDetectorInfo());
+                sedDetectorv.assign(observers.size(), GpuSedDetectorInfo());
+                vector<bool> hasFrame(observers.size(), false);
+                vector<bool> hasSed(observers.size(), false);
+                bool supported = !observers.empty();
+                for (size_t instrumentIndex = 0; supported && instrumentIndex != instruments.size(); ++instrumentIndex)
+                {
+                    size_t observerIndex = observerIndexForInstrument[instrumentIndex];
+                    if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
+                    {
+                        if (hasFrame[observerIndex]
+                            || !frameInstrument->getGpuDetectorInfo(frameDetectorv[observerIndex]))
+                            supported = false;
+                        hasFrame[observerIndex] = true;
+                    }
+                    else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+                    {
+                        if (hasSed[observerIndex]
+                            || !sedInstrument->getGpuDetectorInfo(sedDetectorv[observerIndex]))
+                            supported = false;
+                        hasSed[observerIndex] = true;
+                    }
+                    else
+                        supported = false;
+                }
+                return supported;
+            };
+
+        bool directSourceRequested = primary ? environmentFlag("SKIRTGPU_DEVICE_SOURCE_LIFECYCLE", true)
+                                             : environmentFlag("SKIRTGPU_DEVICE_DUST_SOURCE_LIFECYCLE", true);
+        if (directSourceRequested)
+        {
+            const GpuSourceLaunchData* gpuSource = nullptr;
+            double luminosityPerPacket = 0.;
+            bool sourceReady = primary
+                                   ? sourceSystem()->gpuSourceLaunchData(gpuSource, luminosityPerPacket,
+                                                                         firstIndex, numIndices)
+                                   : _secondarySourceSystem->gpuSourceLaunchData(
+                                         gpuSource, luminosityPerPacket, firstIndex, numIndices);
+            if (sourceReady)
+            {
+                vector<Direction> observerDirectionv;
+                vector<GpuFrameDetectorInfo> frameDetectorv;
+                vector<GpuSedDetectorInfo> sedDetectorv;
+                Position referencePosition;
+                if (prepareResidentDetectorMetadata(referencePosition, observerDirectionv, frameDetectorv,
+                                                    sedDetectorv))
+                {
+                    size_t residentLifecycleRounds = 0;
+                    if (mediumSystem()->runHenyeyGreensteinScatteringLifeCyclesFromGpuSource(
+                            *gpuSource, firstIndex, numIndices, luminosityPerPacket, _config->pathLengthBias(),
+                            _config->minWeightReduction(), _config->minScattEvents(), observerDirectionv,
+                            frameDetectorv, sedDetectorv, store, primary, residentLifecycleRounds))
+                    {
+                        captureProfile(combinedStoreForcedMs);
+                        if (profileBatch)
+                        {
+                            double totalMs = elapsedMilliseconds(profileStart, std::chrono::steady_clock::now());
+                            log()->info(
+                                "SKIRTGPU batch profile phase=" + string(primary ? "primary" : "secondary")
+                                + " call=" + std::to_string(profileBatchCall)
+                                + " index=" + std::to_string(firstIndex) + " count=" + std::to_string(numIndices)
+                                + " active=" + std::to_string(numIndices)
+                                + " device_source=yes dust_source=" + string(primary ? "no" : "yes")
+                                + " packed_source=no prepared=no resident_lifecycle=yes"
+                                  " resident_rounds="
+                                + std::to_string(residentLifecycleRounds)
+                                + " launch_ms=0.00 peel_ms=0.00 emission_peel_batch_ms=0.00"
+                                  " emission_peel_scalar_ms=0.00 prepare_ms=0.00 store_ms=0.00 forced_ms=0.00"
+                                  " store_forced_ms="
+                                + profileMilliseconds(combinedStoreForcedMs)
+                                + " later_peel_ms=0.00 later_peel_batch_ms=0.00 later_peel_scalar_ms=0.00"
+                                  " scatter_ms=0.00 scalar_ms=0.00 total_ms="
+                                + profileMilliseconds(totalMs) + " later_scatter=0 batched_rounds="
+                                + std::to_string(residentLifecycleRounds));
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        vector<double> packetData;
+        bool launchedPacked = peel
+                              && (primary ? sourceSystem()->launchBatchData(packetData, firstIndex, numIndices)
+                                          : _secondarySourceSystem->launchBatchData(packetData, firstIndex,
+                                                                                    numIndices));
+        if (launchedPacked
+            && packetData.size() == 8 * numIndices)
+        {
+            captureProfile(launchMs);
+            Position firstPosition(packetData[0], packetData[1], packetData[2]);
+            vector<Direction> observerDirectionv;
+            vector<GpuFrameDetectorInfo> frameDetectorv;
+            vector<GpuSedDetectorInfo> sedDetectorv;
+            bool supported = prepareResidentDetectorMetadata(firstPosition, observerDirectionv, frameDetectorv,
+                                                             sedDetectorv);
+            size_t packedActive = 0;
+            for (size_t packet = 0; supported && packet != numIndices; ++packet)
+            {
+                size_t offset = 8 * packet;
+                if (!std::isfinite(packetData[offset + 6]) || !std::isfinite(packetData[offset + 7]))
+                    supported = false;
+                else if (packetData[offset + 7] > 0.)
+                    ++packedActive;
+            }
+            if (!packedActive) supported = false;
+
+            vector<int> wavelengthBinv;
+            int numRadiationFieldWavelengths = 1;
+            if (supported)
+            {
+                if (store)
+                {
+                    auto radiationFieldWavelengthGrid = _config->radiationFieldWLG();
+                    if (!radiationFieldWavelengthGrid)
+                        supported = false;
+                    else
+                    {
+                        numRadiationFieldWavelengths = radiationFieldWavelengthGrid->numBins();
+                        wavelengthBinv.reserve(numIndices);
+                        for (size_t packet = 0; packet != numIndices; ++packet)
+                            wavelengthBinv.push_back(radiationFieldWavelengthGrid->bin(packetData[8 * packet + 6]));
+                    }
+                }
+                else
+                {
+                    wavelengthBinv.assign(numIndices, -1);
+                }
+            }
+
+            size_t residentLifecycleRounds = 0;
+            if (supported
+                && mediumSystem()->runHenyeyGreensteinScatteringLifeCyclesFromPackedSource(
+                    packetData, firstIndex, wavelengthBinv, numRadiationFieldWavelengths, _config->pathLengthBias(),
+                    _config->minWeightReduction(), _config->minScattEvents(), observerDirectionv, frameDetectorv,
+                    sedDetectorv, primary, store, residentLifecycleRounds))
+            {
+                captureProfile(combinedStoreForcedMs);
+                if (profileBatch)
+                {
+                    double totalMs = elapsedMilliseconds(profileStart, std::chrono::steady_clock::now());
+                    log()->info("SKIRTGPU batch profile phase=" + string(primary ? "primary" : "secondary")
+                                + " call=" + std::to_string(profileBatchCall)
+                                + " index=" + std::to_string(firstIndex) + " count=" + std::to_string(numIndices)
+                                + " active=" + std::to_string(packedActive) + " packed_source=yes prepared=no"
+                                + " resident_lifecycle=yes resident_rounds="
+                                + std::to_string(residentLifecycleRounds)
+                                + " launch_ms=" + profileMilliseconds(launchMs)
+                                + " peel_ms=0.00 emission_peel_batch_ms=0.00 emission_peel_scalar_ms=0.00"
+                                + " prepare_ms=0.00 store_ms=0.00 forced_ms=0.00 store_forced_ms="
+                                + profileMilliseconds(combinedStoreForcedMs)
+                                + " later_peel_ms=0.00 later_peel_batch_ms=0.00 later_peel_scalar_ms=0.00"
+                                + " scatter_ms=0.00 scalar_ms=0.00 total_ms=" + profileMilliseconds(totalMs)
+                                + " later_scatter=0 batched_rounds=" + std::to_string(residentLifecycleRounds));
+                }
+                return true;
+            }
+        }
+    }
 
     vector<PhotonPacket> ppv(numIndices);
     PhotonPacket ppp;
@@ -1726,6 +2113,103 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
         }
     }
     captureProfile(launchMs);
+
+    if (peel && numIndices >= residentMinimumPackets
+        && environmentFlag("SKIRTGPU_RESIDENT_LIFECYCLE", true)
+        && !_config->needIndividualPeelOff() && !activev.empty())
+    {
+        const auto& instruments = _instrumentSystem->instruments();
+        vector<Instrument*> observers;
+        vector<size_t> observerIndexForInstrument;
+        observers.reserve(instruments.size());
+        observerIndexForInstrument.reserve(instruments.size());
+        assignResidentObserverSlots(instruments, observers, observerIndexForInstrument);
+
+        vector<Direction> observerDirectionv;
+        vector<GpuFrameDetectorInfo> frameDetectorv(observers.size());
+        vector<GpuSedDetectorInfo> sedDetectorv(observers.size());
+        vector<bool> hasFrame(observers.size(), false);
+        vector<bool> hasSed(observers.size(), false);
+        observerDirectionv.reserve(observers.size());
+        for (Instrument* observer : observers) observerDirectionv.push_back(observer->bfkobs(activev.front()->position()));
+
+        bool supported = !observers.empty();
+        for (const PhotonPacket* pp : activev)
+            if (pp->hasNonVelocityEmissionAdjustments()
+                || (!pp->emissionVelocity().isNull()
+                    && !environmentFlag("SKIRTGPU_RESIDENT_MIXED_PRECISION", true)))
+                supported = false;
+        for (size_t instrumentIndex = 0; supported && instrumentIndex != instruments.size(); ++instrumentIndex)
+        {
+            size_t observerIndex = observerIndexForInstrument[instrumentIndex];
+            if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
+            {
+                if (hasFrame[observerIndex] || !frameInstrument->getGpuDetectorInfo(frameDetectorv[observerIndex]))
+                    supported = false;
+                hasFrame[observerIndex] = true;
+            }
+            else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+            {
+                if (hasSed[observerIndex] || !sedInstrument->getGpuDetectorInfo(sedDetectorv[observerIndex]))
+                    supported = false;
+                hasSed[observerIndex] = true;
+            }
+            else
+                supported = false;
+        }
+
+        vector<int> wavelengthBinv;
+        int numRadiationFieldWavelengths = 1;
+        if (supported)
+        {
+            if (store)
+            {
+                auto radiationFieldWavelengthGrid = _config->radiationFieldWLG();
+                if (!radiationFieldWavelengthGrid)
+                    supported = false;
+                else
+                {
+                    numRadiationFieldWavelengths = radiationFieldWavelengthGrid->numBins();
+                    wavelengthBinv.reserve(activev.size());
+                    for (const PhotonPacket* pp : activev)
+                        wavelengthBinv.push_back(radiationFieldWavelengthGrid->bin(pp->wavelength()));
+                }
+            }
+            else
+            {
+                wavelengthBinv.assign(activev.size(), -1);
+            }
+        }
+
+        size_t residentLifecycleRounds = 0;
+        if (supported
+            && mediumSystem()->runHenyeyGreensteinScatteringLifeCycles(
+                activev, wavelengthBinv, numRadiationFieldWavelengths, _config->pathLengthBias(),
+                _config->minWeightReduction(), _config->minScattEvents(), observerDirectionv, frameDetectorv,
+                sedDetectorv, primary, store, residentLifecycleRounds))
+        {
+            captureProfile(combinedStoreForcedMs);
+            if (profileBatch)
+            {
+                double totalMs = elapsedMilliseconds(profileStart, std::chrono::steady_clock::now());
+                log()->info("SKIRTGPU batch profile phase=" + string(primary ? "primary" : "secondary")
+                            + " call=" + std::to_string(profileBatchCall)
+                            + " index=" + std::to_string(firstIndex) + " count=" + std::to_string(numIndices)
+                            + " active=" + std::to_string(activev.size()) + " prepared=no"
+                            + " resident_lifecycle=yes resident_rounds=" + std::to_string(residentLifecycleRounds)
+                            + " launch_ms=" + profileMilliseconds(launchMs)
+                            + " peel_ms=" + profileMilliseconds(peelMs)
+                            + " emission_peel_batch_ms=" + profileMilliseconds(emissionPeelBatchMs)
+                            + " emission_peel_scalar_ms=" + profileMilliseconds(emissionPeelScalarMs)
+                            + " prepare_ms=0.00 store_ms=0.00 forced_ms=0.00"
+                            + " store_forced_ms=" + profileMilliseconds(combinedStoreForcedMs)
+                            + " later_peel_ms=0.00 later_peel_batch_ms=0.00 later_peel_scalar_ms=0.00"
+                            + " scatter_ms=0.00 scalar_ms=0.00 total_ms=" + profileMilliseconds(totalMs)
+                            + " later_scatter=0 batched_rounds=" + std::to_string(residentLifecycleRounds));
+            }
+            return true;
+        }
+    }
 
     if (peel && !activev.empty())
     {
@@ -1823,7 +2307,7 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
             if (peel)
             {
                 auto stageStart = std::chrono::steady_clock::now();
-                bool peeledBatch = peelOffScatteringBatch(roundv);
+                bool peeledBatch = peelOffScatteringBatch(roundv, numIndices);
                 if (profileBatch)
                     laterPeelBatchAttemptMs += elapsedMilliseconds(stageStart, std::chrono::steady_clock::now());
                 if (!peeledBatch)
@@ -1966,7 +2450,8 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
     if (profileBatch)
     {
         double totalMs = elapsedMilliseconds(profileStart, std::chrono::steady_clock::now());
-        log()->info("SKIRTGPU batch profile call=" + std::to_string(profileBatchCall)
+        log()->info("SKIRTGPU batch profile phase=" + string(primary ? "primary" : "secondary")
+                    + " call=" + std::to_string(profileBatchCall)
                     + " index=" + std::to_string(firstIndex) + " count=" + std::to_string(numIndices)
                     + " active=" + std::to_string(activev.size())
                     + " prepared=" + string(preparedBatch ? "yes" : "no")
@@ -2093,9 +2578,10 @@ void MonteCarloSimulation::peelOffScattering(PhotonPacket* pp, PhotonPacket* ppp
 
 ////////////////////////////////////////////////////////////////////
 
-bool MonteCarloSimulation::peelOffScatteringBatch(const vector<PhotonPacket*>& ppv)
+bool MonteCarloSimulation::peelOffScatteringBatch(const vector<PhotonPacket*>& ppv, size_t lifeCycleBatchSize)
 {
-    if (isTruthyEnvironmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_DIRECT") && peelOffScatteringBatchDirect(ppv))
+    bool directByDefault = lifeCycleBatchSize >= 65536;
+    if (environmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_DIRECT", directByDefault) && peelOffScatteringBatchDirect(ppv))
         return true;
 
     if (!isTruthyEnvironmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL") || ppv.empty() || _config->needIndividualPeelOff()
@@ -2128,20 +2614,21 @@ bool MonteCarloSimulation::peelOffScatteringBatch(const vector<PhotonPacket*>& p
 
     vector<size_t> observerIndexForInstrument;
     vector<vector<PhotonPacket>> observerPeelPackets;
+    vector<Instrument*> observerInstruments;
     observerIndexForInstrument.reserve(instruments.size());
     observerPeelPackets.reserve(instruments.size());
+    observerInstruments.reserve(instruments.size());
 
-    size_t lastObserverIndex = 0;
     for (Instrument* instrument : instruments)
     {
-        if (instrument->isSameObserverAsPreceding())
+        size_t observerIndex = matchingDistantObserverIndex(observerInstruments, instrument);
+        if (observerIndex != observerInstruments.size())
         {
-            if (observerPeelPackets.empty()) return false;
-            observerIndexForInstrument.push_back(lastObserverIndex);
+            observerIndexForInstrument.push_back(observerIndex);
             continue;
         }
 
-        size_t observerIndex = observerPeelPackets.size();
+        observerInstruments.push_back(instrument);
         observerPeelPackets.emplace_back();
         vector<PhotonPacket>& peelPackets = observerPeelPackets.back();
         peelPackets.reserve(activeCount);
@@ -2196,7 +2683,6 @@ bool MonteCarloSimulation::peelOffScatteringBatch(const vector<PhotonPacket*>& p
         }
 
         observerIndexForInstrument.push_back(observerIndex);
-        lastObserverIndex = observerIndex;
     }
 
     for (size_t instrumentIndex = 0; instrumentIndex != instruments.size(); ++instrumentIndex)
@@ -2210,6 +2696,9 @@ bool MonteCarloSimulation::peelOffScatteringBatch(const vector<PhotonPacket*>& p
 
         if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
             if (frameInstrument->detectTotalBatch(detectv)) continue;
+
+        if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+            if (sedInstrument->detectTotalBatch(detectv)) continue;
 
         for (PhotonPacket* pp : detectv) instruments[instrumentIndex]->detect(pp);
     }
@@ -2250,9 +2739,17 @@ bool MonteCarloSimulation::peelOffScatteringBatchDirect(const vector<PhotonPacke
     vector<double> emptyDoublev;
     for (Instrument* instrument : instruments)
     {
-        auto frameInstrument = dynamic_cast<FrameInstrument*>(instrument);
-        if (!frameInstrument) return false;
-        if (!frameInstrument->detectTotalBatch(emptyPositionv, emptyDoublev, emptyDoublev, emptyDoublev))
+        if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instrument))
+        {
+            if (!frameInstrument->detectTotalBatch(emptyPositionv, emptyDoublev, emptyDoublev, emptyDoublev))
+                return false;
+        }
+        else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instrument))
+        {
+            if (!sedInstrument->detectTotalBatch(emptyPositionv, emptyDoublev, emptyDoublev, emptyDoublev))
+                return false;
+        }
+        else
             return false;
     }
 
@@ -2324,56 +2821,157 @@ bool MonteCarloSimulation::peelOffScatteringBatchDirect(const vector<PhotonPacke
     vector<size_t> observerIndexForInstrument;
     vector<vector<double>> observerLuminosityv;
     vector<vector<double>> observerTauv;
+    vector<Instrument*> observerInstruments;
     observerIndexForInstrument.reserve(instruments.size());
     observerLuminosityv.reserve(instruments.size());
     observerTauv.reserve(instruments.size());
+    observerInstruments.reserve(instruments.size());
 
-    vector<double> distancev(activePacketv.size(), std::numeric_limits<double>::infinity());
-    size_t lastObserverIndex = 0;
     for (Instrument* instrument : instruments)
     {
-        if (instrument->isSameObserverAsPreceding())
+        size_t observerIndex = matchingDistantObserverIndex(observerInstruments, instrument);
+        if (observerIndex != observerInstruments.size())
         {
-            if (observerLuminosityv.empty()) return false;
-            observerIndexForInstrument.push_back(lastObserverIndex);
+            observerIndexForInstrument.push_back(observerIndex);
             continue;
         }
 
-        Direction bfkobs = instrument->bfkobs(positionv.front());
-        vector<double> luminosityv;
-        vector<double> tauv;
-        if (isTruthyEnvironmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_FUSED")
-            && mediumSystem()->henyeyGreensteinScatteringObservedLuminosities(activePacketv, positionv, lambdav,
-                                                                              bfkobs, distancev, luminosityv)
-            && luminosityv.size() == activePacketv.size())
-        {
-            tauv.assign(activePacketv.size(), 0.);
-        }
-        else
-        {
-            if (!mediumSystem()->henyeyGreensteinScatteringLuminosities(activePacketv, lambdav, bfkobs, luminosityv)
-                || luminosityv.size() != activePacketv.size())
-                return false;
-
-            if (!mediumSystem()->observedExtinctionOpticalDepths(positionv, bfkobs, lambdav, distancev, tauv)
-                || tauv.size() != activePacketv.size())
-                return false;
-        }
-
-        size_t observerIndex = observerLuminosityv.size();
-        observerLuminosityv.push_back(std::move(luminosityv));
-        observerTauv.push_back(std::move(tauv));
+        observerInstruments.push_back(instrument);
         observerIndexForInstrument.push_back(observerIndex);
-        lastObserverIndex = observerIndex;
+    }
+
+    vector<double> distancev(activePacketv.size(), std::numeric_limits<double>::infinity());
+    vector<Direction> observerDirectionv;
+    observerDirectionv.reserve(observerInstruments.size());
+    for (Instrument* instrument : observerInstruments)
+        observerDirectionv.push_back(instrument->bfkobs(positionv.front()));
+
+    if (environmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_DETECTOR_FUSED", true))
+    {
+        vector<GpuFrameDetectorInfo> frameDetectorv(observerInstruments.size());
+        vector<GpuSedDetectorInfo> sedDetectorv(observerInstruments.size());
+        vector<bool> hasFrame(observerInstruments.size(), false);
+        vector<bool> hasSed(observerInstruments.size(), false);
+        bool supported = true;
+        for (size_t instrumentIndex = 0; instrumentIndex != instruments.size(); ++instrumentIndex)
+        {
+            size_t observerIndex = observerIndexForInstrument[instrumentIndex];
+            if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
+            {
+                if (hasFrame[observerIndex] || !frameInstrument->getGpuDetectorInfo(frameDetectorv[observerIndex]))
+                {
+                    supported = false;
+                    break;
+                }
+                hasFrame[observerIndex] = true;
+            }
+            else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+            {
+                if (hasSed[observerIndex] || !sedInstrument->getGpuDetectorInfo(sedDetectorv[observerIndex]))
+                {
+                    supported = false;
+                    break;
+                }
+                hasSed[observerIndex] = true;
+            }
+            else
+            {
+                supported = false;
+                break;
+            }
+        }
+        if (supported
+            && mediumSystem()->henyeyGreensteinScatteringDetectorAccumulate(
+                activePacketv, positionv, lambdav, observerDirectionv, distancev, frameDetectorv, sedDetectorv))
+        {
+            captureProfile(observerMs);
+            if (profileScatterPeel)
+            {
+                double totalMs = elapsedMilliseconds(profileStart, std::chrono::steady_clock::now());
+                log()->info(
+                    "SKIRTGPU scatter-peel direct profile call=" + std::to_string(profileScatterPeelCall)
+                    + " packets=" + std::to_string(ppv.size()) + " active=" + std::to_string(activePacketv.size())
+                    + " instruments=" + std::to_string(instruments.size())
+                    + " observers=" + std::to_string(observerInstruments.size()) + " fused_detector=1"
+                    + " prep_ms=" + profileMilliseconds(prepMs) + " observer_ms=" + profileMilliseconds(observerMs)
+                    + " detect_ms=" + profileMilliseconds(detectMs) + " total_ms=" + profileMilliseconds(totalMs));
+            }
+            return true;
+        }
+    }
+
+    bool usedMultiObserver = false;
+    if (environmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_FUSED", true)
+        && environmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_MULTI_OBSERVER", true))
+    {
+        vector<double> flatLuminosityv;
+        if (observerDirectionv.size() <= std::numeric_limits<size_t>::max() / activePacketv.size())
+        {
+            size_t expectedSize = activePacketv.size() * observerDirectionv.size();
+            if (mediumSystem()->henyeyGreensteinScatteringObservedLuminosities(
+                    activePacketv, positionv, lambdav, observerDirectionv, distancev, flatLuminosityv)
+                && flatLuminosityv.size() == expectedSize)
+            {
+                observerLuminosityv.reserve(observerDirectionv.size());
+                observerTauv.reserve(observerDirectionv.size());
+                for (size_t observerIndex = 0; observerIndex != observerDirectionv.size(); ++observerIndex)
+                {
+                    auto begin = flatLuminosityv.begin() + observerIndex * activePacketv.size();
+                    observerLuminosityv.emplace_back(begin, begin + activePacketv.size());
+                    observerTauv.emplace_back(activePacketv.size(), 0.);
+                }
+                usedMultiObserver = true;
+            }
+        }
+    }
+
+    if (!usedMultiObserver)
+    {
+        for (size_t observerIndex = 0; observerIndex != observerInstruments.size(); ++observerIndex)
+        {
+            Direction bfkobs = observerDirectionv[observerIndex];
+            vector<double> luminosityv;
+            vector<double> tauv;
+            if (environmentFlag("SKIRTGPU_BATCH_SCATTER_PEEL_FUSED", true)
+                && mediumSystem()->henyeyGreensteinScatteringObservedLuminosities(activePacketv, positionv, lambdav,
+                                                                                  bfkobs, distancev, luminosityv)
+                && luminosityv.size() == activePacketv.size())
+            {
+                tauv.assign(activePacketv.size(), 0.);
+            }
+            else
+            {
+                if (!mediumSystem()->henyeyGreensteinScatteringLuminosities(activePacketv, lambdav, bfkobs, luminosityv)
+                    || luminosityv.size() != activePacketv.size())
+                    return false;
+
+                if (!mediumSystem()->observedExtinctionOpticalDepths(positionv, bfkobs, lambdav, distancev, tauv)
+                    || tauv.size() != activePacketv.size())
+                    return false;
+            }
+
+            observerLuminosityv.push_back(std::move(luminosityv));
+            observerTauv.push_back(std::move(tauv));
+        }
     }
     captureProfile(observerMs);
 
     for (size_t instrumentIndex = 0; instrumentIndex != instruments.size(); ++instrumentIndex)
     {
         size_t observerIndex = observerIndexForInstrument[instrumentIndex];
-        auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]);
-        if (!frameInstrument->detectTotalBatch(positionv, lambdav, observerLuminosityv[observerIndex],
-                                               observerTauv[observerIndex]))
+        if (auto frameInstrument = dynamic_cast<FrameInstrument*>(instruments[instrumentIndex]))
+        {
+            if (!frameInstrument->detectTotalBatch(positionv, lambdav, observerLuminosityv[observerIndex],
+                                                   observerTauv[observerIndex]))
+                return false;
+        }
+        else if (auto sedInstrument = dynamic_cast<SEDInstrument*>(instruments[instrumentIndex]))
+        {
+            if (!sedInstrument->detectTotalBatch(positionv, lambdav, observerLuminosityv[observerIndex],
+                                                 observerTauv[observerIndex]))
+                return false;
+        }
+        else
             return false;
     }
     captureProfile(detectMs);
@@ -2381,15 +2979,12 @@ bool MonteCarloSimulation::peelOffScatteringBatchDirect(const vector<PhotonPacke
     if (profileScatterPeel)
     {
         double totalMs = elapsedMilliseconds(profileStart, std::chrono::steady_clock::now());
-        log()->info("SKIRTGPU scatter-peel direct profile call=" + std::to_string(profileScatterPeelCall)
-                    + " packets=" + std::to_string(ppv.size())
-                    + " active=" + std::to_string(activePacketv.size())
-                    + " instruments=" + std::to_string(instruments.size())
-                    + " observers=" + std::to_string(observerLuminosityv.size())
-                    + " prep_ms=" + profileMilliseconds(prepMs)
-                    + " observer_ms=" + profileMilliseconds(observerMs)
-                    + " detect_ms=" + profileMilliseconds(detectMs)
-                    + " total_ms=" + profileMilliseconds(totalMs));
+        log()->info("SKIRTGPU scatter-peel direct profile call=" + std::to_string(profileScatterPeelCall) + " packets="
+                    + std::to_string(ppv.size()) + " active=" + std::to_string(activePacketv.size()) + " instruments="
+                    + std::to_string(instruments.size()) + " observers=" + std::to_string(observerLuminosityv.size())
+                    + " multi_observer=" + string(usedMultiObserver ? "yes" : "no")
+                    + " prep_ms=" + profileMilliseconds(prepMs) + " observer_ms=" + profileMilliseconds(observerMs)
+                    + " detect_ms=" + profileMilliseconds(detectMs) + " total_ms=" + profileMilliseconds(totalMs));
     }
     return true;
 }

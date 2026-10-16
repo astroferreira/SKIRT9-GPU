@@ -24,12 +24,19 @@ void ApertureInstrument::setupSelfBefore()
 
 bool ApertureInstrument::isInsideAperture(PhotonPacket* pp) const
 {
+    return pp && isInsideAperture(pp->position());
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool ApertureInstrument::isInsideAperture(const Position& bfr) const
+{
     // if the instrument has an aperture
     if (_radius2)
     {
         // get the photon packet position
         double x, y, z;
-        pp->position().cartesian(x, y, z);
+        bfr.cartesian(x, y, z);
 
         // transform to detector coordinates using inclination and azimuth
         // but without performing the roll, which would not alter the radius

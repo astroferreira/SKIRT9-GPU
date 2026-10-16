@@ -4,9 +4,49 @@ This document tracks the incremental GPU port. The target state is a SKIRTGPU bu
 one-to-one CPU parity for galaxy SEDs and IFU datacubes, including stellar, gas and dust sources,
 BC03 and MAPPINGS SEDs, dust attenuation, scattering and emission.
 
+The [2026-09-30 throughput pass](THROUGHPUT_20260930.md) targets thousands of images per
+day. A production snapshot-99 galaxy at 1e8 packets now takes 4.2 s instead of about
+700 s, after fixing duplicate viewing directions that disabled the resident lifecycle.
+Viewer dust-emission renders go from 187 s to 50–65 s with a rewritten stochastic dust
+kernel. FP16 Voronoi planes were replaced by FP32, which removed a −0.5% flux bias and a
++3–4% self-absorption bias against upstream CPU SKIRT.
+
+The current optimization focus is optical broadband image generation. The
+[2026-09-27 broadband update](OPTICAL_BROADBAND_20260927.md) adds exact spectral
+rejection of unobservable detector work and persistent NVRTC compilation caching.
+Two matched four-view SDSS workloads complete in 3.69 s and 2.75 s with warm
+caches, 17.6x and 39.0x faster than the pristine 32-thread CPU baseline and
+2.02x and 2.35x faster than the preceding GPU version. The first uncached run
+still takes 7.61 s; equal image-noise parity is not established.
+
+The [2026-09-09 z=1 JWST update](JWST_Z1_20260909.md) records the completed 1k
+NIRCam/MIRI images and spectra, the validated batched stochastic-dust CUDA kernel,
+bounded temporary matrix memory, and the first independent-seed packet-noise
+measurements. Dust preparation is about 16x faster and the complete observation
+2.7-2.8x faster than the preceding GPU version. The current 500x CPU comparison
+target remains unverified; these measurements must not be multiplied by speedups
+from different galaxies or mistaken for a CPU-only baseline.
+
+The [unmodified upstream CPU test](CPU_REFERENCE_20260909.md) now measures
+925 s CPU versus 181 s GPU for the same z=1 JWST model and 10 million
+packets per phase: 5.11x end-to-end. Integrated band differences reach
+5.60%, so whole-workflow CPU/GPU parity still needs investigation. This
+result does not establish equal image noise or the 500x performance target.
+
 ## Current GPU coverage
 
+The [BPASS/TODDLERS follow-up](BPASS_TODDLERS.md) records missing source
+luminosity GPU hooks, CPU launch-worker starvation, and dust-batch sizing.
+For the unchanged MOOSE-197 100M-packet observation, the selected settings
+reduced GPU-version runtime from 284 to 158 s (1.80x). This is not a CPU
+comparison or a GPU-only source-launch implementation.
+
 - `skirtgpu` is built next to the regular `skirt` executable.
+- `skirtgpu` enables GPU acceleration even without `-g`; CPU baselines must use
+  the separate unmodified upstream `skirt` reference documented above.
+- Eligible single-medium Voronoi stochastic dust source preparation now uses bounded
+  GPU emissivity batches by default. `SKIRTGPU_STOCHASTIC_DUST=0` disables the path;
+  `SKIRTGPU_VALIDATE_DUST_EMISSION=1` enables per-batch scalar reference checks.
 - `skirt -g` enables the same runtime GPU path in the regular executable.
 - `skirt -G` or `skirtgpu -G` runs a deterministic GPU backend self-test.
 - The GPU backend is runtime loaded through the CUDA driver and NVRTC. CPU builds still compile and
@@ -399,6 +439,16 @@ packets, so they are part of the production ray-tracing flow rather than a stand
   wavelength selection, position generation, launch-direction conversion, `PhotonPacket`
   initialization, and overhead. `SKIRTGPU_PROFILE_LAUNCH_LIMIT=<count>` caps the number of stderr
   entries; the default limit is 8.
+- `SKIRTGPU_RESIDENT_RF_ONLY=0`: keep radiation-field-only passes (dust self-absorption
+  iterations without peel-off) on the host path. By default they run resident with a
+  detector-less observer when packets are initialized on the GPU.
+- `SKIRTGPU_SHARE_OBSERVER_TRACES=0`: trace each observer slot separately even when several
+  slots share a direction (default: one shared extinction ray per direction).
+- `SKIRTGPU_STOCHASTIC_DUST_BATCH_CELLS=<count>`: cells per stochastic dust GPU launch,
+  1–1048576; by default about 1/16 of the emitting cells per pass, clamped to 2048–16384. The
+  warp-per-cell kernel needs no per-cell scratch memory.
+- `SKIRTGPU_DUMP_DUST_BATCH=<prefix>`: write four stochastic dust kernel batches for the
+  standalone benchmark harness.
 - `SKIRTGPU_NVRTC_LIBRARY=<path>`: override the NVRTC shared library path.
 - `SKIRTGPU_NVRTC_BUILTINS_LIBRARY=<path>`: override the NVRTC builtins shared library path.
 

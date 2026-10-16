@@ -1249,12 +1249,11 @@ bool MediumSystem::observedExtinctionOpticalDepths(const vector<Position>& posit
 
 bool MediumSystem::observedFrameBandAccumulate(
     const vector<Position>& positionv, const vector<double>& lambdav, const vector<double>& luminosityv,
-    Direction bfkobs, const vector<double>& distancev, const void* accumulatorKey,
-    size_t numAccumulatorValues, double costheta, double sintheta, double cosphi, double sinphi,
-    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
-    double ypmin, double ypsiz, double redshift, size_t numPixelsInFrame, const vector<int>& bandOffsetv,
-    const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
-    const vector<double>& bandWidthv) const
+    Direction bfkobs, const vector<double>& distancev, const void* accumulatorKey, size_t numAccumulatorValues,
+    double costheta, double sintheta, double cosphi, double sinphi, double cosomega, double sinomega, int numPixelsX,
+    int numPixelsY, double xpmin, double xpsiz, double ypmin, double ypsiz, double redshift, size_t numPixelsInFrame,
+    const vector<int>& bandOffsetv, const vector<double>& bandWavelengthv, const vector<double>& bandTransmissionv,
+    const vector<double>& bandWidthv, vector<double>* tauOutv) const
 {
     if (positionv.empty() || lambdav.size() != positionv.size() || luminosityv.size() != positionv.size()
         || distancev.size() != positionv.size() || !_hasGpuDustSectionTables || !GpuAcceleration::isProcessEnabled()
@@ -1270,13 +1269,12 @@ bool MediumSystem::observedFrameBandAccumulate(
     vector<double> zeroAsymmparv(_gpuDustSectionLookupWavelength.size(), 0.);
 
     bool ok = GpuAcceleration::getVoronoiMeshSpatialGridHenyeyGreensteinScatteringFrameBandAccumulateFromTables(
-        *voronoiGrid, positionv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin,
-        _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav,
-        distancev, inputDirectionv, luminosityv, bfkobs, _gpuDustSectionLookupBegin.front(),
-        _gpuDustSectionLookupCount.front(), zeroAsymmparv, accumulatorKey, numAccumulatorValues,
-        costheta, sintheta, cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz,
-        ypmin, ypsiz, redshift, numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv,
-        bandWidthv);
+        *voronoiGrid, positionv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav, distancev, inputDirectionv, luminosityv, bfkobs,
+        _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), zeroAsymmparv, accumulatorKey,
+        numAccumulatorValues, costheta, sintheta, cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin,
+        xpsiz, ypmin, ypsiz, redshift, numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv,
+        tauOutv);
     if (!ok) throw FATALERROR("GPU observed frame-band accumulator failed: " + GpuAcceleration::status());
     return true;
 }
@@ -1443,6 +1441,270 @@ bool MediumSystem::henyeyGreensteinScatteringObservedLuminosities(const vector<P
         _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav, distancev, inputDirectionv, packetLuminosityv,
         bfkobs, _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm,
         luminosityv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::henyeyGreensteinScatteringObservedLuminosities(
+    const vector<PhotonPacket*>& ppv, const vector<Position>& positionv, const vector<double>& lambdav,
+    const vector<Direction>& bfkobsv, const vector<double>& distancev, vector<double>& luminosityv) const
+{
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty() || bfkobsv.empty()
+        || positionv.size() != ppv.size() || lambdav.size() != ppv.size() || distancev.size() != ppv.size()
+        || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<double> inputDirectionv;
+    vector<double> packetLuminosityv;
+    inputDirectionv.reserve(3 * ppv.size());
+    packetLuminosityv.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        const PhotonPacket* pp = ppv[i];
+        if (!pp) return false;
+        double kx, ky, kz;
+        pp->direction().cartesian(kx, ky, kz);
+        inputDirectionv.push_back(kx);
+        inputDirectionv.push_back(ky);
+        inputDirectionv.push_back(kz);
+        packetLuminosityv.push_back(pp->perceivedLuminosity(lambdav[i]));
+    }
+
+    return GpuAcceleration::getVoronoiMeshSpatialGridHenyeyGreensteinScatteringObservedLuminositiesFromTables(
+        *voronoiGrid, positionv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav, distancev, inputDirectionv, packetLuminosityv,
+        bfkobsv, _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm,
+        luminosityv);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::henyeyGreensteinScatteringDetectorAccumulate(
+    const vector<PhotonPacket*>& ppv, const vector<Position>& positionv, const vector<double>& lambdav,
+    const vector<Direction>& bfkobsv, const vector<double>& distancev,
+    const vector<GpuFrameDetectorInfo>& frameDetectorv, const vector<GpuSedDetectorInfo>& sedDetectorv) const
+{
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || ppv.empty() || bfkobsv.empty()
+        || positionv.size() != ppv.size() || lambdav.size() != ppv.size() || distancev.size() != ppv.size()
+        || frameDetectorv.size() != bfkobsv.size() || sedDetectorv.size() != bfkobsv.size()
+        || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<double> inputDirectionv;
+    vector<double> packetLuminosityv;
+    inputDirectionv.reserve(3 * ppv.size());
+    packetLuminosityv.reserve(ppv.size());
+    for (size_t i = 0; i != ppv.size(); ++i)
+    {
+        const PhotonPacket* pp = ppv[i];
+        if (!pp) return false;
+        double kx, ky, kz;
+        pp->direction().cartesian(kx, ky, kz);
+        inputDirectionv.push_back(kx);
+        inputDirectionv.push_back(ky);
+        inputDirectionv.push_back(kz);
+        packetLuminosityv.push_back(pp->perceivedLuminosity(lambdav[i]));
+    }
+
+    bool ok = GpuAcceleration::getVoronoiMeshSpatialGridHenyeyGreensteinScatteringDetectorAccumulateFromTables(
+        *voronoiGrid, positionv, _state, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionExt, lambdav, distancev, inputDirectionv, packetLuminosityv,
+        bfkobsv, frameDetectorv, sedDetectorv, _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(),
+        _gpuDustSectionAsymm);
+    if (!ok)
+        throw FATALERROR("GPU Henyey-Greenstein multi-observer detector accumulator failed: "
+                         + GpuAcceleration::status());
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::runHenyeyGreensteinScatteringLifeCycles(
+    const vector<PhotonPacket*>& ppv, const vector<int>& wavelengthBinv, int numWavelengths,
+    double pathLengthBias, double minWeightReduction, int minScattEvents, const vector<Direction>& bfkobsv,
+    const vector<GpuFrameDetectorInfo>& frameDetectorv, const vector<GpuSedDetectorInfo>& sedDetectorv,
+    bool primary, bool storeRadiationField, size_t& propagationRounds) const
+{
+    propagationRounds = 0;
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || !_config->hasConstantPerceivedWavelength()
+        || _config->explicitAbsorption()
+        || (storeRadiationField && !directRadiationFieldAccumulatorEnabled()) || ppv.empty()
+        || wavelengthBinv.size() != ppv.size() || numWavelengths <= 0 || bfkobsv.empty()
+        || frameDetectorv.size() != bfkobsv.size() || sedDetectorv.size() != bfkobsv.size()
+        || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<Position> positionv;
+    vector<Direction> directionv;
+    vector<double> lambdav;
+    vector<double> luminosityv;
+    vector<size_t> historyIndexv;
+    vector<double> emissionVelocityv;
+    bool movingSources = std::any_of(ppv.begin(), ppv.end(), [](const PhotonPacket* pp) {
+        return pp && !pp->emissionVelocity().isNull();
+    });
+    if (movingSources) emissionVelocityv.reserve(4 * ppv.size());
+    positionv.reserve(ppv.size());
+    directionv.reserve(ppv.size());
+    lambdav.reserve(ppv.size());
+    luminosityv.reserve(ppv.size());
+    historyIndexv.reserve(ppv.size());
+    for (const PhotonPacket* pp : ppv)
+    {
+        if (!pp) return false;
+        if (pp->hasNonVelocityEmissionAdjustments()) return false;
+        positionv.push_back(pp->position());
+        directionv.push_back(pp->direction());
+        lambdav.push_back(pp->wavelength());
+        luminosityv.push_back(pp->luminosity());
+        historyIndexv.push_back(pp->historyIndex());
+        if (movingSources)
+        {
+            Vec v = pp->emissionVelocity();
+            emissionVelocityv.insert(emissionVelocityv.end(), {pp->sourceRestWavelength(), v.x(), v.y(), v.z()});
+        }
+    }
+
+    const Array* radiationField = storeRadiationField ? (primary ? &_rf1.data() : &_rf2c.data()) : nullptr;
+    const void* radiationFieldKey = storeRadiationField
+                                        ? (primary ? static_cast<const void*>(&_rf1)
+                                                   : static_cast<const void*>(&_rf2c))
+                                        : nullptr;
+    unsigned long long randomSeed = (primary ? 0x243f6a8885a308d3ULL : 0x13198a2e03707344ULL)
+                                   ^ (0xbf58476d1ce4e5b9ULL * (static_cast<unsigned long long>(find<Random>()->seed()) + 1));
+    bool ok = GpuAcceleration::runVoronoiMeshSpatialGridHenyeyGreensteinLifeCyclesFromTables(
+        *voronoiGrid, positionv, directionv, _state, luminosityv, wavelengthBinv, numWavelengths, lambdav,
+        historyIndexv, pathLengthBias, minWeightReduction, minScattEvents, _gpuDustSectionMedia,
+        _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength,
+        _gpuDustSectionSca, _gpuDustSectionExt, bfkobsv, frameDetectorv, sedDetectorv,
+        _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm,
+        radiationFieldKey, radiationField ? radiationField->size() : 0, randomSeed, propagationRounds,
+        emissionVelocityv);
+    if (!ok) throw FATALERROR("GPU resident photon lifecycle failed: " + GpuAcceleration::status());
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::runHenyeyGreensteinScatteringLifeCyclesFromPackedSource(
+    const vector<double>& packetData, size_t firstHistoryIndex, const vector<int>& wavelengthBinv,
+    int numWavelengths, double pathLengthBias, double minWeightReduction, int minScattEvents,
+    const vector<Direction>& bfkobsv, const vector<GpuFrameDetectorInfo>& frameDetectorv,
+    const vector<GpuSedDetectorInfo>& sedDetectorv, bool primary, bool storeRadiationField,
+    size_t& propagationRounds) const
+{
+    propagationRounds = 0;
+    if (packetData.empty() || packetData.size() % 8) return false;
+    size_t numPackets = packetData.size() / 8;
+    if (!supportsSingleHenyeyGreensteinScatteringPeelOff() || !_config->hasConstantPerceivedWavelength()
+        || _config->explicitAbsorption()
+        || (storeRadiationField && !directRadiationFieldAccumulatorEnabled())
+        || wavelengthBinv.size() != numPackets || numWavelengths <= 0 || bfkobsv.empty()
+        || frameDetectorv.size() != bfkobsv.size() || sedDetectorv.size() != bfkobsv.size()
+        || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<Position> positionv;
+    vector<Direction> directionv;
+    vector<double> lambdav;
+    vector<double> luminosityv;
+    vector<size_t> historyIndexv;
+    positionv.reserve(numPackets);
+    directionv.reserve(numPackets);
+    lambdav.reserve(numPackets);
+    luminosityv.reserve(numPackets);
+    historyIndexv.reserve(numPackets);
+    for (size_t packet = 0; packet != numPackets; ++packet)
+    {
+        size_t offset = 8 * packet;
+        positionv.emplace_back(packetData[offset], packetData[offset + 1], packetData[offset + 2]);
+        directionv.emplace_back(packetData[offset + 3], packetData[offset + 4], packetData[offset + 5], false);
+        lambdav.push_back(packetData[offset + 6]);
+        luminosityv.push_back(packetData[offset + 7]);
+        historyIndexv.push_back(firstHistoryIndex + packet);
+    }
+
+    const Array* radiationField = storeRadiationField ? (primary ? &_rf1.data() : &_rf2c.data()) : nullptr;
+    const void* radiationFieldKey = storeRadiationField
+                                        ? (primary ? static_cast<const void*>(&_rf1)
+                                                   : static_cast<const void*>(&_rf2c))
+                                        : nullptr;
+    unsigned long long randomSeed = (primary ? 0x243f6a8885a308d3ULL : 0x13198a2e03707344ULL)
+                                   ^ (0xbf58476d1ce4e5b9ULL * (static_cast<unsigned long long>(find<Random>()->seed()) + 1));
+    bool ok = GpuAcceleration::runVoronoiMeshSpatialGridHenyeyGreensteinLifeCyclesFromTables(
+        *voronoiGrid, positionv, directionv, _state, luminosityv, wavelengthBinv, numWavelengths, lambdav,
+        historyIndexv, pathLengthBias, minWeightReduction, minScattEvents, _gpuDustSectionMedia,
+        _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount, _gpuDustSectionLookupWavelength,
+        _gpuDustSectionSca, _gpuDustSectionExt, bfkobsv, frameDetectorv, sedDetectorv,
+        _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(), _gpuDustSectionAsymm,
+        radiationFieldKey, radiationField ? radiationField->size() : 0, randomSeed, propagationRounds);
+    if (!ok) throw FATALERROR("GPU packed-source resident photon lifecycle failed: " + GpuAcceleration::lastError());
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool MediumSystem::runHenyeyGreensteinScatteringLifeCyclesFromGpuSource(
+    const GpuSourceLaunchData& source, size_t firstHistoryIndex, size_t numPackets, double luminosityPerPacket,
+    double pathLengthBias, double minWeightReduction, int minScattEvents, const vector<Direction>& bfkobsv,
+    const vector<GpuFrameDetectorInfo>& frameDetectorv, const vector<GpuSedDetectorInfo>& sedDetectorv,
+    bool storeRadiationField, bool primary, size_t& propagationRounds) const
+{
+    propagationRounds = 0;
+    if (!numPackets || !supportsSingleHenyeyGreensteinScatteringPeelOff()
+        || !_config->hasConstantPerceivedWavelength() || _config->explicitAbsorption()
+        || (storeRadiationField && !directRadiationFieldAccumulatorEnabled()) || bfkobsv.empty()
+        || frameDetectorv.size() != bfkobsv.size() || sedDetectorv.size() != bfkobsv.size()
+        || !_hasGpuDustSectionTables)
+        return false;
+
+    const auto* voronoiGrid = dynamic_cast<const VoronoiMeshSpatialGrid*>(_grid);
+    if (!voronoiGrid) return false;
+
+    vector<double> radiationFieldBinBorderPairv;
+    int numRadiationFieldWavelengths = 1;
+    if (storeRadiationField)
+    {
+        auto wavelengthGrid = _config->radiationFieldWLG();
+        if (!wavelengthGrid) return false;
+        numRadiationFieldWavelengths = wavelengthGrid->numBins();
+        radiationFieldBinBorderPairv.reserve(2 * static_cast<size_t>(numRadiationFieldWavelengths));
+        for (int ell = 0; ell != numRadiationFieldWavelengths; ++ell)
+        {
+            radiationFieldBinBorderPairv.push_back(wavelengthGrid->leftBorder(ell));
+            radiationFieldBinBorderPairv.push_back(wavelengthGrid->rightBorder(ell));
+        }
+    }
+
+    const Array* radiationField = storeRadiationField ? (primary ? &_rf1.data() : &_rf2c.data()) : nullptr;
+    const void* radiationFieldKey = storeRadiationField
+                                        ? (primary ? static_cast<const void*>(&_rf1)
+                                                   : static_cast<const void*>(&_rf2c))
+                                        : nullptr;
+    unsigned long long randomSeed = (primary ? 0x243f6a8885a308d3ULL : 0x13198a2e03707344ULL)
+                                   ^ (0xbf58476d1ce4e5b9ULL * (static_cast<unsigned long long>(find<Random>()->seed()) + 1));
+    bool ok = GpuAcceleration::runImportedSourceVoronoiMeshSpatialGridHenyeyGreensteinLifeCyclesFromTables(
+        *voronoiGrid, source, firstHistoryIndex, numPackets, luminosityPerPacket, _state,
+        radiationFieldBinBorderPairv, numRadiationFieldWavelengths, pathLengthBias, minWeightReduction,
+        minScattEvents, _gpuDustSectionMedia, _gpuDustSectionLookupBegin, _gpuDustSectionLookupCount,
+        _gpuDustSectionLookupWavelength, _gpuDustSectionSca, _gpuDustSectionExt, bfkobsv, frameDetectorv,
+        sedDetectorv, _gpuDustSectionLookupBegin.front(), _gpuDustSectionLookupCount.front(),
+        _gpuDustSectionAsymm, radiationFieldKey, radiationField ? radiationField->size() : 0, randomSeed,
+        propagationRounds);
+    if (!ok) throw FATALERROR("GPU direct-source resident photon lifecycle failed: " + GpuAcceleration::lastError());
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////

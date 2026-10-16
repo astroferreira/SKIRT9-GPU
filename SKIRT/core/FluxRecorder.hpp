@@ -10,6 +10,8 @@
 #include "ThreadLocalMember.hpp"
 #include <tuple>
 class Direction;
+struct GpuFrameDetectorInfo;
+struct GpuSedDetectorInfo;
 class MediumSystem;
 class PhotonPacket;
 class Position;
@@ -289,12 +291,33 @@ public:
         if the recorder configuration requires the generic detect() path. */
     bool detectTotalBatch(const vector<PhotonPacket*>& ppv, const vector<int>& pixelv);
 
+    /** This function detects a batch of photon packets for total-only distant SED configurations.
+        It returns false if the recorder configuration requires the generic detect() path. */
+    bool detectTotalBatch(const vector<PhotonPacket*>& ppv);
+
     /** This function detects a batch of direct luminosity contributions for total-only distant
         IFU/frame configurations. The wavelength and luminosity vectors correspond to the
         peel-off photon packet before observer-frame redshift, detector transmission, and
         extinction to the observer are applied. */
     bool detectTotalBatch(const vector<int>& pixelv, const vector<double>& wavelengthv,
                           const vector<double>& luminosityv, const vector<double>& tauv);
+
+    /** This function detects a batch of direct luminosity contributions for total-only distant SED
+        configurations. The wavelength and luminosity vectors correspond to the peel-off photon
+        packet before observer-frame redshift, detector transmission, and extinction to the
+        observer are applied. */
+    bool detectTotalBatch(const vector<double>& wavelengthv, const vector<double>& luminosityv,
+                          const vector<double>& tauv);
+
+    /** Fills the specified descriptor for a total-only distant frame detector that can be used by
+        the fused GPU observer/detector path. Returns false for unsupported recorder or wavelength
+        grid configurations. */
+    bool getGpuFrameDetectorInfo(GpuFrameDetectorInfo& info);
+
+    /** Fills the specified descriptor for a total-only distant SED detector that can be used by
+        the fused GPU observer/detector path. Returns false for unsupported recorder or wavelength
+        grid configurations. */
+    bool getGpuSedDetectorInfo(GpuSedDetectorInfo& info);
 
     /** This function detects a batch of direct luminosity contributions for total-only distant
         frame configurations. It projects positions and evaluates band transmissions on the GPU
@@ -318,18 +341,18 @@ public:
 	        frame configurations by fusing observer extinction, detector projection, band
 	        transmission, and GPU accumulator updates. It returns false before accumulation when the
 	        recorder configuration requires the generic detect path. */
-	    bool detectObservedFrameBandBatch(
-	        const vector<Position>& positionv, const vector<double>& wavelengthv,
-	        const vector<double>& luminosityv, const Direction& bfkobs, double costheta,
-	        double sintheta, double cosphi, double sinphi, double cosomega, double sinomega,
-	        int numPixelsX, int numPixelsY, double xpmin, double xpsiz, double ypmin,
-	        double ypsiz);
+            bool detectObservedFrameBandBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                                              const vector<double>& luminosityv, const Direction& bfkobs,
+                                              double costheta, double sintheta, double cosphi, double sinphi,
+                                              double cosomega, double sinomega, int numPixelsX, int numPixelsY,
+                                              double xpmin, double xpsiz, double ypmin, double ypsiz,
+                                              vector<double>* tauOutv = nullptr);
 
-	    /** This function detects a batch of direct Henyey-Greenstein scattering peel-off
+            /** This function detects a batch of direct Henyey-Greenstein scattering peel-off
 	        contributions for total-only distant frame configurations by fusing observer extinction,
 	        detector projection, band transmission, and GPU accumulator updates. It returns false
 	        before accumulation when the recorder configuration requires the generic detect path. */
-	    bool detectHenyeyGreensteinScatteringFrameBandBatch(
+            bool detectHenyeyGreensteinScatteringFrameBandBatch(
 	        const vector<PhotonPacket*>& ppv, const vector<Position>& positionv,
 	        const vector<double>& wavelengthv, const Direction& bfkobs, double costheta,
 	        double sintheta, double cosphi, double sinphi, double cosomega, double sinomega,

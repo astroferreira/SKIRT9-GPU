@@ -90,6 +90,11 @@ public:
     bool cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
                   const vector<double>& flattenedParameters, size_t numEntities) const override;
 
+    /** Exposes the underlying stored table and its four non-wavelength coordinates for GPU source
+        spectrum construction. */
+    bool gpuSpectrumTable(GpuSourceSpectrumTable& table, const vector<double>& flattenedParameters,
+                          size_t numEntities) const override;
+
     /** This function samples wavelengths and normalized specific luminosities for a batch of
         star-forming region parameter vectors, using the GPU backend if available. */
     bool sampleWavelengthBatch(vector<double>& wavelengths, vector<double>& specificLuminosities,

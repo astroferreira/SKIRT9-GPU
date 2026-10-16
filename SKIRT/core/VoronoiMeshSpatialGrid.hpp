@@ -115,6 +115,10 @@ public:
     const vector<int>& traversalBlockIndex() const;
     double traversalEpsilon() const;
 
+    /** This function returns the axis-aligned cell extents as xmin, ymin, zmin, xmax, ymax, zmax
+        sextuples for GPU dust-source rejection sampling. */
+    vector<double> gpuCellExtentCoordinates() const;
+
     /** This function outputs the grid plot files; it is provided here because the regular
         mechanism does not apply. The function reconstructs the Voronoi tesselation in order to
         produce the coordinates of the Voronoi cell vertices. */

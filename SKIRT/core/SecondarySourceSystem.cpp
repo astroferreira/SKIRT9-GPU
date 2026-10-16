@@ -4,6 +4,7 @@
 ///////////////////////////////////////////////////////////////// */
 
 #include "SecondarySourceSystem.hpp"
+#include "GpuAcceleration.hpp"
 #include "Configuration.hpp"
 #include "ContGasSecondarySource.hpp"
 #include "DustSecondarySource.hpp"
@@ -14,6 +15,8 @@
 #include "NR.hpp"
 #include "PhotonPacket.hpp"
 #include "ProbePhotonPacketInterface.hpp"
+#include <cmath>
+#include <limits>
 
 ////////////////////////////////////////////////////////////////////
 
@@ -83,6 +86,8 @@ int SecondarySourceSystem::numSources() const
 
 bool SecondarySourceSystem::prepareForLaunch(size_t numPackets)
 {
+    // Primary source buffers are no longer needed while preparing dust and gas emission.
+    GpuAcceleration::clearSourceLaunchCaches();
     // obtain the luminosity for each source
     int Ns = _sources.size();
     _Lv.resize(Ns);
@@ -166,6 +171,61 @@ void SecondarySourceSystem::launchBatch(PhotonPacket* ppv, size_t firstHistoryIn
         }
         offset += count;
     }
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool SecondarySourceSystem::launchBatchData(vector<double>& packetData, size_t firstHistoryIndex,
+                                            size_t numPackets) const
+{
+    packetData.clear();
+    if (!numPackets || !_callbackv.empty() || numPackets > std::numeric_limits<size_t>::max() / 8) return false;
+
+    packetData.reserve(8 * numPackets);
+    size_t endHistoryIndex = firstHistoryIndex + numPackets;
+    size_t offset = 0;
+    while (offset != numPackets)
+    {
+        size_t historyIndex = firstHistoryIndex + offset;
+        auto s = std::upper_bound(_Iv.cbegin(), _Iv.cend(), historyIndex) - _Iv.cbegin() - 1;
+        size_t sourceEnd = min(endHistoryIndex, _Iv[s + 1]);
+        size_t count = sourceEnd - historyIndex;
+        double weight = _Lv[s] / _Wv[s];
+
+        vector<double> sourceData;
+        if (!_sources[s]->launchBatchData(sourceData, historyIndex, count, _Lpp * weight)
+            || sourceData.size() != 8 * count)
+        {
+            packetData.clear();
+            return false;
+        }
+        packetData.insert(packetData.end(), sourceData.begin(), sourceData.end());
+        offset += count;
+    }
+    return packetData.size() == 8 * numPackets;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool SecondarySourceSystem::gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData,
+                                                double& luminosityPerPacket, size_t firstHistoryIndex,
+                                                size_t numPackets) const
+{
+    sourceData = nullptr;
+    luminosityPerPacket = 0.;
+    if (!numPackets || !_callbackv.empty() || _Iv.size() < 2
+        || firstHistoryIndex > std::numeric_limits<size_t>::max() - numPackets)
+        return false;
+
+    size_t s = static_cast<size_t>(std::upper_bound(_Iv.cbegin(), _Iv.cend(), firstHistoryIndex) - _Iv.cbegin() - 1);
+    if (s >= _sources.size() || firstHistoryIndex > std::numeric_limits<size_t>::max() - numPackets
+        || firstHistoryIndex + numPackets > _Iv[s + 1])
+        return false;
+    sourceData = _sources[s]->gpuSourceLaunchData();
+    if (!sourceData) return false;
+
+    luminosityPerPacket = _Lpp * _Lv[s] / _Wv[s];
+    return std::isfinite(luminosityPerPacket) && luminosityPerPacket > 0.;
 }
 
 ////////////////////////////////////////////////////////////////////

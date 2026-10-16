@@ -200,6 +200,9 @@ public:
         function relies. */
     Array emissivity(const Array& Jv) const override;
 
+    /** Batched stochastic emissivities on the GPU; false requests the existing scalar path. */
+    bool emissivityBatch(const vector<double>& radiationFields, size_t numCells, vector<double>& spectra) const;
+
     //=========== Exposing multiple grain populations (MultiGrainPopulationInterface) ============
 
 public:

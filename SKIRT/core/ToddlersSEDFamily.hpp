@@ -265,6 +265,15 @@ public:
     double cdf(Array& lambdav, Array& pv, Array& Pv, const Range& wavelengthRange,
                const Array& parameters) const override;
 
+    /** GPU luminosity integration for SFRNormalized mode; Cloud mode uses scalar fallback. */
+    bool cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                  const vector<double>& flattenedParameters, size_t numEntities) const override;
+
+    /** Exposes the SFR-normalized stored table and its non-wavelength coordinates for GPU source
+        spectrum construction. Cloud mode remains unsupported. */
+    bool gpuSpectrumTable(GpuSourceSpectrumTable& table, const vector<double>& flattenedParameters,
+                          size_t numEntities) const override;
+
     //======================== Data Members =======================
 
 private:

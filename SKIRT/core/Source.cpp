@@ -52,3 +52,18 @@ void Source::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t num
 }
 
 //////////////////////////////////////////////////////////////////////
+
+bool Source::launchBatchData(vector<double>& /*packetData*/, size_t /*firstHistoryIndex*/, size_t /*numPackets*/,
+                             double /*L*/) const
+{
+    return false;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+const GpuSourceLaunchData* Source::gpuSourceLaunchData() const
+{
+    return nullptr;
+}
+
+//////////////////////////////////////////////////////////////////////

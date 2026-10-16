@@ -7,6 +7,8 @@
 #define SEDINSTRUMENT_HPP
 
 #include "ApertureInstrument.hpp"
+#include "Position.hpp"
+struct GpuSedDetectorInfo;
 
 ////////////////////////////////////////////////////////////////////
 
@@ -32,6 +34,19 @@ public:
         that the arriving photon packet projects within the aperture and then calls the detect()
         function of the FluxRecorder instance associated with this instrument. */
     void detect(PhotonPacket* pp) override;
+
+    /** This function detects a batch of photon packets for total-only SED outputs. It returns
+        false if the associated flux recorder requires the generic scalar detect() path. */
+    bool detectTotalBatch(const vector<PhotonPacket*>& ppv);
+
+    /** This function detects a batch of direct luminosity contributions for total-only SED
+        outputs. It returns false if the associated flux recorder requires the generic scalar
+        detect() path. */
+    bool detectTotalBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                          const vector<double>& luminosityv, const vector<double>& tauv);
+
+    /** Fills a descriptor for the fused GPU observer/detector path. */
+    bool getGpuDetectorInfo(GpuSedDetectorInfo& info);
 };
 
 ////////////////////////////////////////////////////////////////////

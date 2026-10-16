@@ -4,6 +4,7 @@
 ///////////////////////////////////////////////////////////////// */
 
 #include "ParticleSnapshot.hpp"
+#include "CubicSplineSmoothingKernel.hpp"
 #include "EntityCollection.hpp"
 #include "Log.hpp"
 #include "NR.hpp"
@@ -191,6 +192,23 @@ void ParticleSnapshot::readAndClose()
 void ParticleSnapshot::setSmoothingKernel(const SmoothingKernel* kernel)
 {
     _kernel = kernel;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool ParticleSnapshot::getGpuSourceLaunchGeometry(vector<double>& centerSizev) const
+{
+    if (!dynamic_cast<const CubicSplineSmoothingKernel*>(_kernel)) return false;
+
+    centerSizev.resize(4 * _propv.size());
+    for (size_t m = 0; m != _propv.size(); ++m)
+    {
+        centerSizev[4 * m] = _propv[m][positionIndex()];
+        centerSizev[4 * m + 1] = _propv[m][positionIndex() + 1];
+        centerSizev[4 * m + 2] = _propv[m][positionIndex() + 2];
+        centerSizev[4 * m + 3] = _propv[m][sizeIndex()];
+    }
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////

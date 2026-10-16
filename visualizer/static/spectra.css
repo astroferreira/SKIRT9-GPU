@@ -1,0 +1,63 @@
+.observation-kind { margin-bottom: 17px; }
+#spectral-settings { margin-bottom: 20px; }
+.resolution-label { margin-top: 14px; }
+.resolution-control { display: flex; gap: 8px; }
+.resolution-control input { flex: 1; min-width: 0; width: 100%; border: 1px solid #d7ddd2; border-radius: 4px; padding: 9px; background: #fff; color: inherit; font: inherit; font-size: 12px; }
+.resolution-control input:invalid { border-color: #b25940; }
+.resolution-control button { flex-shrink: 0; padding: 7px 10px; font-size: 10px; }
+.unit-suffix { align-self:center; color:#819078; font-size:10px; }
+.legend-dot.gas { background:#ad4fff; }
+.spectral-range { color: #4d7b62; font-size: 10px; line-height: 1.6; margin-top: 9px; }
+.spectral-scope { font-size: 10px; line-height: 1.6; color: #66775f; margin-top: 8px; }
+.spectral-approximation { color: #8c917d; font-size: 9px; line-height: 1.6; margin-top: 6px; }
+body[data-observation="sed"] #result-image:has(img:not([hidden])) { background: white; }
+body[data-observation="sed"] #result-image img { background: white; }
+#result-image img.spectrum-thumbnail { background: white; }
+input:disabled { opacity: .4; cursor: default; }
+.history-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spectrum-section { margin-top: 24px; border-top: 1px solid #d7ddd2; padding: 24px 28px 18px; }
+.spectrum-heading { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+.spectrum-heading h2 { font-size: 20px; font-weight: 480; margin-bottom: 7px; }
+.spectrum-heading p:not(.eyebrow) { color: #859080; font-size: 11px; }
+.spectrum-tools { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
+.spectrum-tools button { border-radius: 4px; padding: 7px 10px; font-size: 10px; }
+.spectrum-tools button[aria-pressed="true"] { color: #245f51; background: #e7eee1; }
+.spectrum-tools label { display: flex; align-items: center; font-size: 10px; letter-spacing: 0; margin: 0 4px 0 0; }
+.spectrum-tools input { accent-color: #437964; }
+.spectrum-chart { margin: 10px auto 0; max-width: 1200px; height: 390px; min-width: 0; }
+.spectrum-chart svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; overflow: hidden; }
+.spectrum-chart text { font-family: inherit; fill: #6d7e6c; font-size: 10px; }
+.spectrum-chart .axis-label { font-size: 12px; fill: #405b45; }
+.spectrum-footer { border-top: 1px solid #e1e4dc; display: flex; gap: 16px; justify-content: space-between; padding-top: 14px; font-size: 10px; color: #819078; }
+#spectrum-readout { font-variant-numeric: tabular-nums; }
+.spectrum-feature-tools { display:flex; flex-wrap:wrap; gap:10px 18px; margin:12px 0; }
+.spectrum-feature-tools label { display:flex; align-items:center; gap:5px; font-size:12px; margin:0; letter-spacing:0; }
+.feature-swatch { display:inline-block; width:14px; height:2px; background:#376caa; }
+.feature-swatch.molecular { background:#9a4667; }
+.feature-swatch.pah { background:#8b650b; }
+.feature-swatch.dust { background:#725ca5; }
+.spectrum-feature-status { font-size:11px; color:#647267; margin-bottom:12px; }
+.spectrum-reference { display:grid; grid-template-columns:minmax(180px,260px) minmax(0,1fr); gap:20px; padding:14px 0; border-top:1px solid #e1e4dc; }
+.spectrum-reference label { font-size:11px; letter-spacing:0; }
+.spectrum-reference select { display:block; width:100%; margin-top:7px; padding:9px 28px 9px 8px; font:inherit; background:#fff; border:1px solid #cbd5ce; border-radius:4px; color:#263d34; }
+#spectrum-feature-details { min-height:84px; font-size:12px; line-height:1.65; overflow-wrap:anywhere; }
+#spectrum-feature-details strong { font-weight:550; }
+#spectrum-feature-details p { margin:4px 0; }
+#spectrum-feature-details a { color:#376caa; text-decoration:underline; }
+[data-feature-label]:focus rect, [data-feature-label][aria-pressed="true"] rect { stroke:#376caa; stroke-width:1; }
+@media (min-width: 621px) and (max-width: 960px) {
+  .observation-kind, #band-settings, #spectral-settings { grid-column: 1; }
+  .observation .result-image { grid-row: 3/11; }
+  .observation .result-details { grid-row: 11; }
+}
+@media (max-width: 620px) {
+  .spectrum-section { padding: 18px 14px; }
+  .spectrum-heading { flex-direction: column; align-items: flex-start; gap: 14px; }
+  .spectrum-heading h2 { font-size: 17px; }
+  .spectrum-reference { grid-template-columns:minmax(0,1fr); gap:8px; }
+  .spectrum-footer { flex-direction: column; font-size: 9px; gap: 7px; }
+}
+.scene-actions { display: flex; gap: 6px; }
+.scene-toolbar .scene-actions button { background: #142022d9; border: 1px solid #34433f; }
+.scene-toolbar .scene-actions button.active { background: #365c4d; color: #e6f5e9; border-color: #78a78b; }
+.picking-target { cursor: crosshair !important; }

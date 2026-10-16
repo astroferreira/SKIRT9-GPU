@@ -1,0 +1,12 @@
+.venv/
+node_modules/
+static/app.js
+static/app.js.map
+var/
+__pycache__/
+.pytest_cache/
+test-results/
+playwright-report/
+state/
+*.log
+test-results*/

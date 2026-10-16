@@ -10,6 +10,10 @@
 #include "StringUtils.hpp"
 #include "System.hpp"
 #include "Units.hpp"
+#include <cerrno>
+#include <charconv>
+#include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <regex>
 #include <sstream>
@@ -405,26 +409,49 @@ bool TextInFile::readRow(Array& values)
                 // resize result array (and clear it in case there are virtual zero columns)
                 if (values.size() != _numLogCols || _haveZeroCols) values.resize(_numLogCols);
 
-                // convert values from line and store them in result array
-                std::stringstream linestream(line);
+                // convert values from line and store them in result array; std::from_chars yields the same
+                // correctly rounded values as stream extraction but is several times faster on large snapshots
+                const char* next = line.data() + pos;
+                const char* end = line.data() + line.size();
                 for (size_t i : _logColIndices)  // i: zero-based logical index
                 {
-                    if (linestream.eof()) throw FATALERROR("One or more required value(s) on text line are missing");
+                    while (next != end && std::isspace(static_cast<unsigned char>(*next))) ++next;
+                    if (next == end) throw FATALERROR("One or more required value(s) on text line are missing");
 
-                    // read the value as floating point
-                    double value;
-                    linestream >> value;
-                    if (linestream.fail())
+                    // read the value as floating point; like stream extraction, accept a leading plus sign
+                    const char* first = next;
+                    if (*first == '+' && first + 1 != end && *(first + 1) != '-') ++first;
+                    double value = 0.;
+                    auto result = std::from_chars(first, end, value);
+                    if (result.ec == std::errc::result_out_of_range)
                     {
-                        // some compilers/libraries do not support reading NaN or Inf values, while others do;
-                        // we here provide backup support for NaN values (infinities are more complex because of
-                        // the need for handling the negative sign which may be already consumed by the stream)
-                        linestream.clear();
-                        string offending;
-                        linestream >> offending;
+                        // underflow yields a denormal or zero as with stream extraction; overflow is an error
+                        char* stop = nullptr;
+                        errno = 0;
+                        string token(first, result.ptr);
+                        value = std::strtod(token.c_str(), &stop);
+                        if (std::isinf(value))
+                            throw FATALERROR("Input text is not formatted as a floating point number: " + token);
+                        next = result.ptr;
+                    }
+                    else if (result.ec != std::errc())
+                    {
+                        // report the offending token, but keep supporting NaN values in any letter case
+                        const char* stop = next;
+                        while (stop != end && !std::isspace(static_cast<unsigned char>(*stop))) ++stop;
+                        string offending(next, stop);
                         if (StringUtils::toLower(offending) != "nan")
                             throw FATALERROR("Input text is not formatted as a floating point number: " + offending);
                         value = std::numeric_limits<double>::quiet_NaN();
+                        next = stop;
+                    }
+                    else
+                    {
+                        // stream extraction never produced infinities, so keep rejecting them
+                        if (std::isinf(value))
+                            throw FATALERROR("Input text is not formatted as a floating point number: "
+                                             + string(next, result.ptr));
+                        next = result.ptr;
                     }
 
                     // if mapped to a logical column, convert from input units to internal units, and store the result

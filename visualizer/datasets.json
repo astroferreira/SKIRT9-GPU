@@ -1,0 +1,2097 @@
+{
+  "raw_series": [
+    {
+      "id_prefix": "moose",
+      "name": "MOOSE",
+      "output_dir": "/data/RUNs/output",
+      "preview_fov_kpc": 300,
+      "default_model_fov_kpc": 300,
+      "selection": "primary-central-subhalo",
+      "physical_options": {
+        "diffuse_dust": "rr2014",
+        "diffuse_grain_mix": "dl07"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "id": "arepo-095",
+      "name": "AREPO · Galaxy 095",
+      "description": "Collaboration galaxy · snapshot 095 · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/arepo-095/skirt/arepo-095_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.6980936379867664,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 175216,
+            "fraction": 0.2280656540018483,
+            "weight_fraction": 0.23500749706549112,
+            "raw_min": 7.99986188404489e-10,
+            "raw_max": 0.18556424975395203,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10075463.111538952,
+            "raw_max": 7155854630.670862,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 8006,
+            "fraction": 0.13404771871075763,
+            "weight_fraction": 0.4823398991099955,
+            "raw_min": 0.0012168814428150654,
+            "raw_max": 0.11705809086561203,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/arepo-095/arepo-095_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "diffuse_dust_mass_msun": 113105519.65125418,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md"
+      }
+    },
+    {
+      "id": "tng100-lineage-s79-296828",
+      "name": "TNG100 lineage · s79 · progenitor",
+      "description": "TNG100-1 · snapshot 79 · subhalo 296828 · 150 kpc · progenitor",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-lineage-s79-296828/skirt/tng100-lineage-s79-296828_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.2733533465784399,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 19504,
+            "fraction": 0.1131066638057516,
+            "weight_fraction": 0.11217905985586221,
+            "raw_min": 7.95171706258202e-10,
+            "raw_max": 0.09082680940628052,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 10194387.869549626,
+            "raw_max": 10351266331.635046,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 485,
+            "fraction": 0.3988486842105263,
+            "weight_fraction": 0.5071207822203512,
+            "raw_min": 0.004492013715207577,
+            "raw_max": 0.06276605278253555,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-lineage-s79-296828/tng100-lineage-s79-296828_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 309,
+        "subhalo": 296828,
+        "lineage_role": "progenitor",
+        "diffuse_dust_mass_msun": 131760915.94845779,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/validation.json"
+      }
+    },
+    {
+      "id": "tng100-lineage-s80-299199",
+      "name": "TNG100 lineage · s80 · snapshot 80 target",
+      "description": "TNG100-1 · snapshot 80 · subhalo 299199 · 150 kpc · snapshot 80 target",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-lineage-s80-299199/skirt/tng100-lineage-s80-299199_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.2613432561610123,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 19527,
+            "fraction": 0.11258453785970031,
+            "weight_fraction": 0.11164572340726292,
+            "raw_min": 7.95171706258202e-10,
+            "raw_max": 0.09082680940628052,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 11196273.287369164,
+            "raw_max": 10470328503.482023,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 0.004564009606838226,
+            "raw_max": 0.030812349170446396,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-lineage-s80-299199/tng100-lineage-s80-299199_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 309,
+        "subhalo": 299199,
+        "lineage_role": "target",
+        "diffuse_dust_mass_msun": 96592249.37110731,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/validation.json"
+      }
+    },
+    {
+      "id": "tng100-80-10604",
+      "name": "TNG100 · Galaxy 10604",
+      "description": "TNG100-1 · snapshot 80 · 150 kpc region from halo 1 · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-80-10604/skirt/tng100-80-10604_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.2613432561610123,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 210509,
+            "fraction": 0.17230332273365337,
+            "weight_fraction": 0.16589864028635198,
+            "raw_min": 7.904432108851722e-10,
+            "raw_max": 0.14790822565555573,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 14460387.017921405,
+            "raw_max": 10461210244.080217,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 0.007900664582848549,
+            "raw_max": 0.00870741717517376,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-80-10604/tng100-80-10604_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 1,
+        "temperature_hydrogen_fraction": {
+          "value": 0.75,
+          "origin": "Exporter fallback; mini snapshot lacks GFM_Metals"
+        },
+        "diffuse_dust_mass_msun": 694597.6021756979,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_80_10604_observatory_20260910/validation.json"
+      }
+    },
+    {
+      "id": "tng100-80-10604-full-halo",
+      "name": "TNG100 · Halo 1 · full region",
+      "description": "TNG100-1 · snapshot 80 · all halo 1 members around galaxy 10604 · no spatial crop",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-80-10604-full-halo/skirt/tng100-80-10604-full-halo_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.2613432561610123,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 1079226,
+            "fraction": 0.15045805511160285,
+            "weight_fraction": 0.1430524934152998,
+            "raw_min": 7.278280200750942e-10,
+            "raw_max": 0.21377050876617432,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 10030239.148158593,
+            "raw_max": 10461210244.080217,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 13922,
+            "fraction": 0.1132173672611351,
+            "weight_fraction": 0.4267154012923322,
+            "raw_min": 0.0004981060046702623,
+            "raw_max": 0.16177836060523987,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng100-80-10604-full-halo/tng100-80-10604-full-halo_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "export_fov_kpc": 8000,
+        "parent_fof_halo": 1,
+        "temperature_hydrogen_fraction": {
+          "value": 0.75,
+          "origin": "Exporter fallback; mini snapshot lacks GFM_Metals"
+        },
+        "full_halo": true,
+        "radiation_field_memory_lower_bound_gib": 304.90731820464134,
+        "diffuse_dust_mass_msun": 4001148111.3481207,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_full_halo_20260910/validation.json"
+      },
+      "render_available": false,
+      "render_unavailable_reason": "Full halo is view-only on this host: 27.28M Voronoi cells need about 305 GiB for the three 500-bin radiation-field arrays alone. Use Galaxy 10604 (150 kpc) for image/SED runs."
+    },
+    {
+      "id": "tng50-257247",
+      "name": "TNG50 · Galaxy 257247",
+      "description": "TNG50-1 · snapshot 50 · 150 kpc halo export · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng50-257247/skirt/tng50-257247_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.9972942257819404,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 155660,
+            "fraction": 0.13808912541483956,
+            "weight_fraction": 0.1396331686864921,
+            "raw_min": 7.985959671330534e-10,
+            "raw_max": 0.1772587150335312,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10016656.996086227,
+            "raw_max": 5695448451.110579,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 14859,
+            "fraction": 0.06626766624893524,
+            "weight_fraction": 0.3654223770256662,
+            "raw_min": 0.001058936002664268,
+            "raw_max": 0.09991434216499329,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng50-257247/tng50-257247_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "diffuse_dust_mass_msun": 251487834.20994088,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md"
+      }
+    },
+    {
+      "id": "tng50-355724",
+      "name": "TNG50 · Galaxy 355724",
+      "description": "TNG50-1 · snapshot 99 · 150 kpc halo export · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng50-355724/skirt/tng50-355724_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 2.220446049250313e-16,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 770502,
+            "fraction": 0.14519082321004487,
+            "weight_fraction": 0.14799761611316117,
+            "raw_min": 7.925350375970197e-10,
+            "raw_max": 0.289846271276474,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10017344.502394678,
+            "raw_max": 13669499071.137854,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 11475,
+            "fraction": 0.013316452288224891,
+            "weight_fraction": 0.060581780762512374,
+            "raw_min": 0.003104620147496462,
+            "raw_max": 0.21598725020885468,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng50-355724/tng50-355724_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "diffuse_dust_mass_msun": 936831574.8803831,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md"
+      }
+    },
+    {
+      "id": "tng50-400782",
+      "name": "TNG50 · Galaxy 400782",
+      "description": "TNG50-1 · snapshot 50 · halo export · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng50-400782/skirt/tng50-400782_physical_v1.ski",
+      "notes": "Corrected RR2014 resolved dust; BPASS/TODDLERS and fully covered Draine-Li grains retained. No whole-cell cloud subtraction. Empirical two-component model; combined cloud+diffuse mass unknown; observational calibration and native-pixel convergence not established.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.9972942257819404,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 3298,
+            "fraction": 0.032568657851337605,
+            "weight_fraction": 0.03173951067364936,
+            "raw_min": 7.997171258544711e-10,
+            "raw_max": 0.14902450144290924,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10035039.173597049,
+            "raw_max": 5670327663.496377,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 3330,
+            "fraction": 0.10318542389687654,
+            "weight_fraction": 0.3302523291253995,
+            "raw_min": 0.0010057432809844613,
+            "raw_max": 0.07461576163768768,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/adopted/tng50-400782/tng50-400782_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/resolved_dust_20260911/README.md",
+        "catalogue_revision": "dust-only-rr2014-dl07-v1",
+        "diffuse_dust_mass_msun": 41014046.716345996,
+        "parent_validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md"
+      }
+    },
+    {
+      "id": "arepo-095-legacy",
+      "name": "AREPO · Galaxy 095 · legacy",
+      "description": "Collaboration galaxy · snapshot 095",
+      "base_ski": "/home/astroferrreira/SKIRT/workfolder/collab_arepo_095_main_jwst_nircam_z1.ski",
+      "legacy_dust_columns": [
+        0,
+        1,
+        2,
+        4
+      ],
+      "notes": "Preserved pre-upgrade catalogue. Known young-source accounting limitations. Legacy dust table converted from x,y,z,h,mass to x,y,z,mass. Equilibrium dust physics retained from the base model."
+    },
+    {
+      "id": "tng50-257247-legacy",
+      "name": "TNG50 · Galaxy 257247 · legacy",
+      "description": "TNG50-1 · snapshot 50 · 150 kpc halo export",
+      "base_ski": "/home/astroferrreira/SKIRT/benchmarks/z1_jwst_20260905/z1_jwst_1k_10m.ski",
+      "notes": "Preserved pre-upgrade catalogue. Known young-source accounting limitations. Stochastic dust emission; existing z=1 JWST benchmark model."
+    },
+    {
+      "id": "tng50-355724-legacy",
+      "name": "TNG50 · Galaxy 355724 · legacy",
+      "description": "TNG50-1 · snapshot 99 · 150 kpc halo export",
+      "base_ski": "/home/astroferrreira/SKIRT/benchmarks/z0_jwst_20260909/z0_355724_jwst_1k_10m.ski",
+      "notes": "Preserved pre-upgrade catalogue. Known young-source accounting limitations. Stochastic dust emission; local observer at 10 Mpc. Large catalogue: setup can take several minutes."
+    },
+    {
+      "id": "tng50-400782-legacy",
+      "name": "TNG50 · Galaxy 400782 · legacy",
+      "description": "TNG50-1 · snapshot 50 · halo export",
+      "base_ski": "/home/astroferrreira/src/illustris_to_stellarmap/skirt9/tng_logmass_gt9_halomode/TNG50-1_50_400782_sdss_broadband.ski",
+      "notes": "Preserved pre-upgrade catalogue. Known young-source accounting limitations. Observer settings and dust physics retained from the exported model."
+    },
+    {
+      "id": "arepo-095-torrey-dl07",
+      "name": "AREPO · Galaxy 095 - Torrey/DL07",
+      "description": "Collaboration galaxy · snapshot 095 · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/arepo-095/skirt/arepo-095_physical_v1.ski",
+      "notes": "Complete gas SFR; volume-derived source sizes; stochastic Draine–Li PAH dust. Diffuse dust fraction and unresolved clouds are empirical; combined dust mass is unknown. Metallicity clipping is reported. No PSF or detector noise; pixel convergence depends on scale and photon count.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.6980936379867664,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 175216,
+            "fraction": 0.2280656540018483,
+            "weight_fraction": 0.23500749706549112,
+            "raw_min": 7.99986188404489e-10,
+            "raw_max": 0.18556424975395203,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10075463.111538952,
+            "raw_max": 7155854630.670862,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 8006,
+            "fraction": 0.13404771871075763,
+            "weight_fraction": 0.4823398991099955,
+            "raw_min": 0.0012168814428150654,
+            "raw_max": 0.11705809086561203,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/arepo-095/arepo-095_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md",
+        "catalogue_revision": "float64-v2"
+      }
+    },
+    {
+      "id": "tng100-lineage-s79-296828-torrey-dl07",
+      "name": "TNG100 lineage · s79 · progenitor - Torrey/DL07",
+      "description": "TNG100-1 · snapshot 79 · subhalo 296828 · 150 kpc · progenitor",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/datasets/tng100-lineage-s79-296828/skirt/tng100-lineage-s79-296828_physical_v1.ski",
+      "notes": "Immediate SubLink progenitor of snapshot-80 subhalo 299199; parent halo 309 downloaded in halo mode, then cropped to a 150 kpc physical cube around the tracked subhalo. Complete regional gas SFR; BPASS/TODDLERS and stochastic Draine–Li dust. Gas temperature assumes hydrogen fraction 0.75 because the mini snapshot lacks elemental abundances. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.2733533465784399,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 19504,
+            "fraction": 0.1131066638057516,
+            "weight_fraction": 0.11217905985586221,
+            "raw_min": 7.95171706258202e-10,
+            "raw_max": 0.09082680940628052,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 10194387.869549626,
+            "raw_max": 10351266331.635046,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 485,
+            "fraction": 0.3988486842105263,
+            "weight_fraction": 0.5071207822203512,
+            "raw_min": 0.004492013715207577,
+            "raw_max": 0.06276605278253555,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/datasets/tng100-lineage-s79-296828/tng100-lineage-s79-296828_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/validation.json",
+        "catalogue_revision": "lineage-150kpc-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 309,
+        "subhalo": 296828,
+        "lineage_role": "progenitor"
+      }
+    },
+    {
+      "id": "tng100-lineage-s80-299199-torrey-dl07",
+      "name": "TNG100 lineage · s80 · snapshot 80 target - Torrey/DL07",
+      "description": "TNG100-1 · snapshot 80 · subhalo 299199 · 150 kpc · snapshot 80 target",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/datasets/tng100-lineage-s80-299199/skirt/tng100-lineage-s80-299199_physical_v1.ski",
+      "notes": "Immediate SubLink snapshot 80 target of snapshot-80 subhalo 299199; parent halo 309 downloaded in halo mode, then cropped to a 150 kpc physical cube around the tracked subhalo. Complete regional gas SFR; BPASS/TODDLERS and stochastic Draine–Li dust. Gas temperature assumes hydrogen fraction 0.75 because the mini snapshot lacks elemental abundances. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.2613432561610123,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 19527,
+            "fraction": 0.11258453785970031,
+            "weight_fraction": 0.11164572340726292,
+            "raw_min": 7.95171706258202e-10,
+            "raw_max": 0.09082680940628052,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 11196273.287369164,
+            "raw_max": 10470328503.482023,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 0.004564009606838226,
+            "raw_max": 0.030812349170446396,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/datasets/tng100-lineage-s80-299199/tng100-lineage-s80-299199_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_299199_lineage_20260910/validation.json",
+        "catalogue_revision": "lineage-150kpc-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 309,
+        "subhalo": 299199,
+        "lineage_role": "target"
+      }
+    },
+    {
+      "id": "tng100-80-10604-torrey-dl07",
+      "name": "TNG100 · Galaxy 10604 - Torrey/DL07",
+      "description": "TNG100-1 · snapshot 80 · 150 kpc region from halo 1 · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/tng100_80_10604_observatory_20260910/dataset/skirt/tng100-80-10604_physical_v1.ski",
+      "notes": "150 kpc physical cube centered on galaxy 10604, from the full parent-halo download. Only this region enters images and integrated SEDs. Full raw halo retained. Observer z equals snapshot z=0.261343. Gas temperature assumes hydrogen mass fraction 0.75 (mini snapshot has no elemental abundances). Complete regional gas SFR; stochastic Draine–Li dust. Template clipping is reported. Diffuse and cloud dust are empirical; combined mass unknown. Preview points are sampled, not a radiative-transfer image. No PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.2613432561610123,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 210509,
+            "fraction": 0.17230332273365337,
+            "weight_fraction": 0.16589864028635198,
+            "raw_min": 7.904432108851722e-10,
+            "raw_max": 0.14790822565555573,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 14460387.017921405,
+            "raw_max": 10461210244.080217,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 0.007900664582848549,
+            "raw_max": 0.00870741717517376,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/tng100_80_10604_observatory_20260910/dataset/tng100-80-10604_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_80_10604_observatory_20260910/validation.json",
+        "catalogue_revision": "float64-physical-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 1,
+        "temperature_hydrogen_fraction": {
+          "value": 0.75,
+          "origin": "Exporter fallback; mini snapshot lacks GFM_Metals"
+        }
+      }
+    },
+    {
+      "id": "tng100-80-10604-full-halo-torrey-dl07",
+      "name": "TNG100 · Halo 1 · full region - Torrey/DL07",
+      "description": "TNG100-1 · snapshot 80 · all halo 1 members around galaxy 10604 · no spatial crop",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/tng100_full_halo_20260910/dataset/skirt/tng100-80-10604-full-halo_physical_v1.ski",
+      "notes": "All downloaded parent FoF halo 1 members, not the whole TNG simulation box. An 8 Mpc centered model box encloses the full 5.51 Mpc-wide halo. Preview is sampled; no spatial crop. Full-resolution physical tables retained; radiative transfer disabled to avoid exhausting host memory. BPASS/TODDLERS with empirical stochastic Draine–Li dust. Template clipping audited. Gas temperatures assume hydrogen mass fraction 0.75; mini snapshot lacks elemental abundances.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.2613432561610123,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 1079226,
+            "fraction": 0.15045805511160285,
+            "weight_fraction": 0.1430524934152998,
+            "raw_min": 7.278280200750942e-10,
+            "raw_max": 0.21377050876617432,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000,
+              100000000000
+            ],
+            "count": 0,
+            "fraction": 0,
+            "weight_fraction": 0,
+            "raw_min": 10030239.148158593,
+            "raw_max": 10461210244.080217,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 13922,
+            "fraction": 0.1132173672611351,
+            "weight_fraction": 0.4267154012923322,
+            "raw_min": 0.0004981060046702623,
+            "raw_max": 0.16177836060523987,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/tng100_full_halo_20260910/dataset/tng100-80-10604-full-halo_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng100_full_halo_20260910/validation.json",
+        "catalogue_revision": "full-halo-physical-v1",
+        "export_fov_kpc": 8000,
+        "parent_fof_halo": 1,
+        "temperature_hydrogen_fraction": {
+          "value": 0.75,
+          "origin": "Exporter fallback; mini snapshot lacks GFM_Metals"
+        },
+        "full_halo": true,
+        "radiation_field_memory_lower_bound_gib": 304.90731820464134
+      },
+      "render_available": false,
+      "render_unavailable_reason": "Full halo is view-only on this host: 27.28M Voronoi cells need about 305 GiB for the three 500-bin radiation-field arrays alone. Use Galaxy 10604 (150 kpc) for image/SED runs."
+    },
+    {
+      "id": "tng50-257247-torrey-dl07",
+      "name": "TNG50 · Galaxy 257247 - Torrey/DL07",
+      "description": "TNG50-1 · snapshot 50 · 150 kpc halo export · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/tng50-257247/skirt/tng50-257247_physical_v1.ski",
+      "notes": "Complete gas SFR; volume-derived source sizes; stochastic Draine–Li PAH dust. Diffuse dust fraction and unresolved clouds are empirical; combined dust mass is unknown. Metallicity clipping is reported. No PSF or detector noise; pixel convergence depends on scale and photon count.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.9972942257819404,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 155660,
+            "fraction": 0.13808912541483956,
+            "weight_fraction": 0.1396331686864921,
+            "raw_min": 7.985959671330534e-10,
+            "raw_max": 0.1772587150335312,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10016656.996086227,
+            "raw_max": 5695448451.110579,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 14859,
+            "fraction": 0.06626766624893524,
+            "weight_fraction": 0.3654223770256662,
+            "raw_min": 0.001058936002664268,
+            "raw_max": 0.09991434216499329,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/tng50-257247/tng50-257247_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md",
+        "catalogue_revision": "float64-v2"
+      }
+    },
+    {
+      "id": "tng50-355724-torrey-dl07",
+      "name": "TNG50 · Galaxy 355724 - Torrey/DL07",
+      "description": "TNG50-1 · snapshot 99 · 150 kpc halo export · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/tng50-355724/skirt/tng50-355724_physical_v1.ski",
+      "notes": "Complete gas SFR; volume-derived source sizes; stochastic Draine–Li PAH dust. Diffuse dust fraction and unresolved clouds are empirical; combined dust mass is unknown. Metallicity clipping is reported. No PSF or detector noise; pixel convergence depends on scale and photon count.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 2.220446049250313e-16,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 770502,
+            "fraction": 0.14519082321004487,
+            "weight_fraction": 0.14799761611316117,
+            "raw_min": 7.925350375970197e-10,
+            "raw_max": 0.289846271276474,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10017344.502394678,
+            "raw_max": 13669499071.137854,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 11475,
+            "fraction": 0.013316452288224891,
+            "weight_fraction": 0.060581780762512374,
+            "raw_min": 0.003104620147496462,
+            "raw_max": 0.21598725020885468,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/tng50-355724/tng50-355724_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md",
+        "catalogue_revision": "float64-v2"
+      }
+    },
+    {
+      "id": "tng50-400782-torrey-dl07",
+      "name": "TNG50 · Galaxy 400782 - Torrey/DL07",
+      "description": "TNG50-1 · snapshot 50 · halo export · BPASS/TODDLERS",
+      "base_ski": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/tng50-400782/skirt/tng50-400782_physical_v1.ski",
+      "notes": "Complete gas SFR; volume-derived source sizes; stochastic Draine–Li PAH dust. Diffuse dust fraction and unresolved clouds are empirical; combined dust mass is unknown. Metallicity clipping is reported. No PSF or detector noise; pixel convergence depends on scale and photon count.",
+      "physics": {
+        "model": "bpass-toddlers-dl07-v1",
+        "snapshot_redshift": 0.9972942257819404,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "Torrey ISM, dust-to-metal 0.2, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 3298,
+            "fraction": 0.032568657851337605,
+            "weight_fraction": 0.03173951067364936,
+            "raw_min": 7.997171258544711e-10,
+            "raw_max": 0.14902450144290924,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10035039.173597049,
+            "raw_max": 5670327663.496377,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 3330,
+            "fraction": 0.10318542389687654,
+            "weight_fraction": 0.3302523291253995,
+            "raw_min": 0.0010057432809844613,
+            "raw_max": 0.07461576163768768,
+            "policy": "clip-report"
+          }
+        },
+        "resources": [
+          {
+            "pack": "ExtraDust",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_ExtraDust_v3.zip",
+            "sha256": "f0da2b860b7e2da78703911a88836f3747aa89252b65c063637704ffcb1e663f",
+            "bytes": 4408334,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "TODDLERS",
+            "version": 2,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_TODDLERS_v2.zip",
+            "sha256": "25498cc790f1944c2db784125fa58e1913757fd89110ec0352e03628db36e16b",
+            "bytes": 340510586,
+            "zip_crc_verified": true
+          },
+          {
+            "pack": "BPASS",
+            "version": 3,
+            "url": "https://sciences.ugent.be/skirtextdat/SKIRT9/Resources/SKIRT9_Resources_BPASS_v3.zip",
+            "sha256": "e3ccca47abca98b5d22a9e91350c712ceca667adfd3debaa270eee66a9c4558a",
+            "bytes": 1933453008,
+            "zip_crc_verified": true
+          }
+        ],
+        "metadata_path": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/datasets_v2/tng50-400782/tng50-400782_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/skirt_physical_upgrade_20260910/IMPLEMENTATION_REPORT.md",
+        "catalogue_revision": "float64-v2"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s087-359813",
+      "name": "TNG50 PMCTRL001 · s87 · progenitor, 0.839 Gyr before selection",
+      "description": "TNG50-1 · snapshot 87 · subhalo 359813 · 150 kpc · progenitor, 0.839 Gyr before selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s087-359813/skirt/tng50-pmctrl001-s087-359813_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_progenitor; parent halo 51 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.15274876890238098,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 129588,
+            "fraction": 0.10162832116582243,
+            "weight_fraction": 0.10223660917727678,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10086991.355439335,
+            "raw_max": 11640480524.292887,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 27647,
+            "fraction": 0.3166968315425325,
+            "weight_fraction": 0.5270116939654329,
+            "raw_min": 0.005953047890216112,
+            "raw_max": 0.11872615665197372,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s087-359813/tng50-pmctrl001-s087-359813_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 51,
+        "subhalo": 359813,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_progenitor",
+        "temporal_relation": "before_selection",
+        "relative_time_gyr": -0.83909,
+        "raw_sha256": "05ac1251a5ffd417acd05a8ebf8262906192b9296fe21c719541ec76701aa304",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/87/subhalos/359813/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s088-362155",
+      "name": "TNG50 PMCTRL001 · s88 · progenitor, 0.712 Gyr before selection",
+      "description": "TNG50-1 · snapshot 88 · subhalo 362155 · 150 kpc · progenitor, 0.712 Gyr before selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s088-362155/skirt/tng50-pmctrl001-s088-362155_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_progenitor; parent halo 51 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.14187620396956202,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 134742,
+            "fraction": 0.1045181678486906,
+            "weight_fraction": 0.10514396526503993,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10114559.439325266,
+            "raw_max": 11767616360.77666,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 29406,
+            "fraction": 0.3101833294656231,
+            "weight_fraction": 0.5832348484515438,
+            "raw_min": 0.004837678279727697,
+            "raw_max": 0.10829170048236847,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s088-362155/tng50-pmctrl001-s088-362155_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 51,
+        "subhalo": 362155,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_progenitor",
+        "temporal_relation": "before_selection",
+        "relative_time_gyr": -0.71196,
+        "raw_sha256": "89023f4f56d4a76dafd7ae369d85b5e2f79d991b37975d45ae49d52fc2a0a0fa",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/88/subhalos/362155/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s089-367347",
+      "name": "TNG50 PMCTRL001 · s89 · progenitor, 0.520 Gyr before selection",
+      "description": "TNG50-1 · snapshot 89 · subhalo 367347 · 150 kpc · progenitor, 0.520 Gyr before selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s089-367347/skirt/tng50-pmctrl001-s089-367347_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_progenitor; parent halo 51 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.12575933241126092,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 146847,
+            "fraction": 0.11212151059048815,
+            "weight_fraction": 0.11248398658589401,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10011344.118483257,
+            "raw_max": 11940973226.15048,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 31727,
+            "fraction": 0.5395381266580505,
+            "weight_fraction": 0.8183429007230003,
+            "raw_min": 0.005250947084277868,
+            "raw_max": 0.09354870021343231,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s089-367347/tng50-pmctrl001-s089-367347_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 51,
+        "subhalo": 367347,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_progenitor",
+        "temporal_relation": "before_selection",
+        "relative_time_gyr": -0.5199,
+        "raw_sha256": "bebf4b451ffbf9068485f53fe6c6452373111d2693134e68d081171ff1b9a42d",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/89/subhalos/367347/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s090-374020",
+      "name": "TNG50 PMCTRL001 · s90 · progenitor, 0.326 Gyr before selection",
+      "description": "TNG50-1 · snapshot 90 · subhalo 374020 · 150 kpc · progenitor, 0.326 Gyr before selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s090-374020/skirt/tng50-pmctrl001-s090-374020_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_progenitor; parent halo 51 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.10986994045882548,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 159573,
+            "fraction": 0.1209263800519556,
+            "weight_fraction": 0.12109687045904426,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10030329.643024638,
+            "raw_max": 12134634180.002357,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 21000,
+            "fraction": 0.6271277548826375,
+            "weight_fraction": 0.8456965485468273,
+            "raw_min": 0.0037460478488355875,
+            "raw_max": 0.09626279026269913,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s090-374020/tng50-pmctrl001-s090-374020_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 51,
+        "subhalo": 374020,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_progenitor",
+        "temporal_relation": "before_selection",
+        "relative_time_gyr": -0.32624,
+        "raw_sha256": "6e1b7050d452a999ec2cd2b6b441b9aaa014d7357e312906d397bc8ef7634707",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/90/subhalos/374020/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s091-377005",
+      "name": "TNG50 PMCTRL001 · s91 · progenitor, 0.196 Gyr before selection",
+      "description": "TNG50-1 · snapshot 91 · subhalo 377005 · 150 kpc · progenitor, 0.196 Gyr before selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s091-377005/skirt/tng50-pmctrl001-s091-377005_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_progenitor; parent halo 50 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.09940180263022191,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 163410,
+            "fraction": 0.12437360335620734,
+            "weight_fraction": 0.1245441328458152,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10020676.639524328,
+            "raw_max": 12264617142.05048,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 18574,
+            "fraction": 0.8204425990547286,
+            "weight_fraction": 0.9557444681363853,
+            "raw_min": 0.004639680963009596,
+            "raw_max": 0.1280011534690857,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s091-377005/tng50-pmctrl001-s091-377005_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 50,
+        "subhalo": 377005,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_progenitor",
+        "temporal_relation": "before_selection",
+        "relative_time_gyr": -0.19626,
+        "raw_sha256": "6cfba64e749bb2a202b3a188e05bd8d4951ae04574416ccbfd74751565d74c49",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/91/subhalos/377005/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s092-374436",
+      "name": "TNG50 PMCTRL001 · s92 · selected post-merger",
+      "description": "TNG50-1 · snapshot 92 · subhalo 374436 · 150 kpc · selected post-merger",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s092-374436/skirt/tng50-pmctrl001-s092-374436_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch selected_galaxy; parent halo 46 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.08388443079747931,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 166239,
+            "fraction": 0.12707654909874788,
+            "weight_fraction": 0.12726202784673052,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10195710.194080831,
+            "raw_max": 12460883539.988594,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 738,
+            "fraction": 0.04894548348587346,
+            "weight_fraction": 0.05498500078170034,
+            "raw_min": 0.004905337002128363,
+            "raw_max": 0.07635607570409775,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s092-374436/tng50-pmctrl001-s092-374436_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 46,
+        "subhalo": 374436,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "selected_galaxy",
+        "temporal_relation": "at_selection",
+        "relative_time_gyr": 0.0,
+        "raw_sha256": "db0c1a4735266775748cdb403d78e478e75eeb166bb3ad865dd07a7c39902fb1",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/92/subhalos/374436/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s093-373883",
+      "name": "TNG50 PMCTRL001 · s93 · descendant, 0.132 Gyr after selection",
+      "description": "TNG50-1 · snapshot 93 · subhalo 373883 · 150 kpc · descendant, 0.132 Gyr after selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s093-373883/skirt/tng50-pmctrl001-s093-373883_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_descendant; parent halo 45 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.07366138465643868,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 166223,
+            "fraction": 0.12713419367766993,
+            "weight_fraction": 0.12732398325684055,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10312612.31184799,
+            "raw_max": 12592576389.270159,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 15,
+            "fraction": 0.0005022265376502494,
+            "weight_fraction": 0.0004191233703602524,
+            "raw_min": 0.0030589529778808355,
+            "raw_max": 0.05031904578208923,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s093-373883/tng50-pmctrl001-s093-373883_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 45,
+        "subhalo": 373883,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_descendant",
+        "temporal_relation": "after_selection",
+        "relative_time_gyr": 0.13169,
+        "raw_sha256": "1dfe7296d35a4997f8a245b99ddb5588112861787913de01c4d91bfc7c0a56e1",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/93/subhalos/373883/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s094-378055",
+      "name": "TNG50 PMCTRL001 · s94 · descendant, 0.330 Gyr after selection",
+      "description": "TNG50-1 · snapshot 94 · subhalo 378055 · 150 kpc · descendant, 0.330 Gyr after selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s094-378055/skirt/tng50-pmctrl001-s094-378055_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_descendant; parent halo 45 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.058507322794512984,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 166217,
+            "fraction": 0.1265347044171473,
+            "weight_fraction": 0.12672657347859326,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10389910.42974513,
+            "raw_max": 12791366494.74711,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 0.003822672413662076,
+            "raw_max": 0.02986408956348896,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s094-378055/tng50-pmctrl001-s094-378055_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 45,
+        "subhalo": 378055,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_descendant",
+        "temporal_relation": "after_selection",
+        "relative_time_gyr": 0.330483,
+        "raw_sha256": "fb1b38009085f480cfadc5d7113018ac459b3ce962df14124a502650e0fc1a9e",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/94/subhalos/378055/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s095-375733",
+      "name": "TNG50 PMCTRL001 · s95 · descendant, 0.464 Gyr after selection",
+      "description": "TNG50-1 · snapshot 95 · subhalo 375733 · 150 kpc · descendant, 0.464 Gyr after selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s095-375733/skirt/tng50-pmctrl001-s095-375733_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_descendant; parent halo 42 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.04852362998180593,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 166279,
+            "fraction": 0.1255113933146741,
+            "weight_fraction": 0.12568777721665148,
+            "raw_min": 7.989897632398879e-10,
+            "raw_max": 0.24943949282169342,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10441313.075111758,
+            "raw_max": 12924714136.312998,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 0.003635964123532176,
+            "raw_max": 0.029511215165257454,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s095-375733/tng50-pmctrl001-s095-375733_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 42,
+        "subhalo": 375733,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_descendant",
+        "temporal_relation": "after_selection",
+        "relative_time_gyr": 0.46383,
+        "raw_sha256": "3241ff35569fa74bb58287bdfea236cf85695499597edb357b77d39475311ea0",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/95/subhalos/375733/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s096-377488",
+      "name": "TNG50 PMCTRL001 · s96 · descendant, 0.665 Gyr after selection",
+      "description": "TNG50-1 · snapshot 96 · subhalo 377488 · 150 kpc · descendant, 0.665 Gyr after selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s096-377488/skirt/tng50-pmctrl001-s096-377488_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_descendant; parent halo 42 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.0337243718735154,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 483805,
+            "fraction": 0.14857945018186822,
+            "weight_fraction": 0.1522042377060232,
+            "raw_min": 7.850432526268492e-10,
+            "raw_max": 0.26408714056015015,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10253617.04898814,
+            "raw_max": 13125944516.11662,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 4965,
+            "fraction": 0.03841362929493776,
+            "weight_fraction": 0.03769177373168912,
+            "raw_min": 0.003244326915591955,
+            "raw_max": 0.04772612452507019,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s096-377488/tng50-pmctrl001-s096-377488_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 42,
+        "subhalo": 377488,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_descendant",
+        "temporal_relation": "after_selection",
+        "relative_time_gyr": 0.66506,
+        "raw_sha256": "2a3b40320697627c9ced93c087f5ecc0b5e077867585dd41ee066157c1d4528e",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/96/subhalos/377488/"
+      }
+    },
+    {
+      "id": "tng50-pmctrl001-s097-384588",
+      "name": "TNG50 PMCTRL001 · s97 · descendant, 0.800 Gyr after selection",
+      "description": "TNG50-1 · snapshot 97 · subhalo 384588 · 150 kpc · descendant, 0.800 Gyr after selection",
+      "base_ski": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s097-384588/skirt/tng50-pmctrl001-s097-384588_physical_v1.ski",
+      "notes": "PMCTRL001 tracked main-branch main_descendant; parent halo 44 was downloaded in halo mode and cropped to a 150 kpc physical cube around the authenticated subhalo position. RR2014 diffuse dust, BPASS/TODDLERS sources, and stochastic Draine-Li grains. Gas temperature assumes hydrogen fraction 0.75 because the halo cutout lacks GFM_Metals. Template clipping is audited. Preview is sampled; no PSF or detector noise.",
+      "physics": {
+        "model": "bpass-toddlers-rr2014-dl07-v1",
+        "snapshot_redshift": 0.023974428382762536,
+        "source_model": "BPASS Chabrier100 + TODDLERS BPASSChab100Bin, 10 Myr",
+        "diffuse_dust": "RR2014, no whole-cell cloud subtraction, DraineLiDustMix, stochastic",
+        "birth_cloud": {
+          "sfe": 0.025,
+          "density_cm3": 320.0,
+          "include_dust": true,
+          "implicit_cloud_dust_mass_msun": null,
+          "total_combined_dust_mass_msun": null,
+          "accounting": "Empirical diffuse + unresolved templates; no whole-cell subtraction; combined mass not known"
+        },
+        "template_bounds": {
+          "BPASS_Z": {
+            "bounds": [
+              1e-05,
+              0.04
+            ],
+            "count": 484884,
+            "fraction": 0.14670550703870805,
+            "weight_fraction": 0.15028857696399073,
+            "raw_min": 7.850432526268492e-10,
+            "raw_max": 0.26408714056015015,
+            "policy": "clip-report"
+          },
+          "BPASS_age_yr": {
+            "bounds": [
+              1000000.0,
+              100000000000.0
+            ],
+            "count": 0,
+            "fraction": 0.0,
+            "weight_fraction": 0.0,
+            "raw_min": 10037389.212343762,
+            "raw_max": 13260890867.25431,
+            "policy": "clip-report"
+          },
+          "TODDLERS_Z": {
+            "bounds": [
+              0.001,
+              0.04
+            ],
+            "count": 1927,
+            "fraction": 0.009725642992691888,
+            "weight_fraction": 0.010655236279481875,
+            "raw_min": 0.0037711847107857466,
+            "raw_max": 0.04561162367463112,
+            "policy": "clip-report"
+          }
+        },
+        "metadata_path": "/data/TNG50/observatory/PMCTRL001_postmerger/tng50-pmctrl001-s097-384588/tng50-pmctrl001-s097-384588_physics.json",
+        "validation_report": "/home/astroferrreira/SKIRT/diagnostics/tng50_pmctrl001_observatory_20260913/validation.json",
+        "catalogue_revision": "pmctrl001-150kpc-rr2014-dl07-v1",
+        "export_fov_kpc": 150,
+        "parent_fof_halo": 44,
+        "subhalo": 384588,
+        "pair_id": "PMCTRL001",
+        "lineage_role": "main_descendant",
+        "temporal_relation": "after_selection",
+        "relative_time_gyr": 0.800006,
+        "raw_sha256": "176f85aab808b8f74d9e062edfd2452214793e7af349c63df2bd5022bec8f612",
+        "subhalo_api_url": "https://www.tng-project.org/api/TNG50-1/snapshots/97/subhalos/384588/"
+      }
+    }
+  ]
+}

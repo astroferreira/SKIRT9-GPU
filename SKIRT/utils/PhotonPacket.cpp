@@ -22,7 +22,7 @@ void PhotonPacket::launch(size_t historyIndex, double lambda, double L, Position
     _W = L * lambda;
     _lambda0 = lambda;
     _D = 0;
-    _bvi = bvi;
+    _emissionVelocity = bvi ? bvi->velocity() : Vec();
     _adi = adi;
     _ppi = ppi;
     _compIndex = 0;
@@ -30,7 +30,7 @@ void PhotonPacket::launch(size_t historyIndex, double lambda, double L, Position
     _nscatt = 0;
     setPosition(bfr);
     setDirection(bfk);
-    if (bvi) _lambda = shiftedEmissionWavelength(lambda, bfk, bvi->velocity());
+    if (bvi) _lambda = shiftedEmissionWavelength(lambda, bfk, _emissionVelocity);
     if (ppi)
         setPolarized(ppi->polarizationForDirection(bfk));
     else
@@ -74,7 +74,8 @@ void PhotonPacket::launchEmissionPeelOff(const PhotonPacket* pp, Direction bfk)
     _nscatt = 0;
     setPosition(pp->position());
     setDirection(bfk);
-    if (pp->_bvi) _lambda = shiftedEmissionWavelength(_lambda0, bfk, pp->_bvi->velocity());
+    if (!pp->_emissionVelocity.isNull())
+        _lambda = shiftedEmissionWavelength(_lambda0, bfk, pp->_emissionVelocity);
     if (pp->_adi) applyBias(pp->_adi->probabilityForDirection(bfk));
     if (pp->_ppi)
         setPolarized(pp->_ppi->polarizationForDirection(bfk));

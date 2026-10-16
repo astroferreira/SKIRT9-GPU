@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10191c">
+  <title>SKIRTGPU · Observatory</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%231b534d'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23b9e0cd'/%3E%3Cpath d='M5 24L27 8' stroke='%23b9e0cd'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/spectra.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="SKIRTGPU Observatory home"><span class="brand-orbit">✳</span> SKIRT<span class="brand-gpu">GPU</span><span class="brand-divider"></span><span class="brand-subtitle">Observatory</span></a>
+    <div class="top-meta"><span class="status-dot" id="backend-dot"></span><span id="backend-status">Connecting to renderer</span><span class="local-badge">LOCAL WORKSPACE</span></div>
+  </header>
+  <main>
+    <div class="intro"><div><p class="eyebrow">THE VIRTUAL OBSERVATORY</p><h1>A galaxy. Any perspective.</h1><p class="subtitle">Explore the structure. Frame your view. Follow the light.</p></div><div class="intro-tag"><span>01 / OBSERVATION STUDIO</span><span>AREPO → SKIRTGPU</span></div></div>
+    <div id="error-banner" class="error-banner" role="alert" hidden></div>
+    <div class="workspace">
+      <aside class="controls panel">
+        <div class="panel-heading"><span class="step">01</span><h2>Your galaxy</h2></div>
+        <label for="dataset">CATALOGUE</label><select id="dataset" disabled><option>Loading catalogues…</option></select>
+        <p id="dataset-description" class="muted compact">Reading the available galaxy models.</p>
+        <div class="dataset-metrics"><div><strong id="particle-count">—</strong><span>catalogue sources</span></div><div><strong id="redshift">—</strong><span>observer redshift</span></div></div>
+        <div class="layer-toggles"><label><input type="checkbox" data-layer="stars" checked><i class="legend-dot stars"></i>Stars</label><label id="young-layer-label"><input type="checkbox" data-layer="young" checked><i class="legend-dot young"></i>Young</label><label id="gas-layer-label" hidden><input type="checkbox" data-layer="gas" checked><i class="legend-dot gas"></i>Gas</label><label><input type="checkbox" data-layer="dust"><i class="legend-dot dust"></i><span id="dust-layer-name">Dust</span></label></div>
+        <div class="stellar-age-key" title="Display colour mapped continuously from stellar population age"><span>1 Myr</span><i></i><span>10+ Gyr</span></div>
+        <label for="preview-mode">GPU PREVIEW</label>
+        <select id="preview-mode"><option value="diagnostic">Diagnostic · ages / purple gas</option><option value="volume">Browser GPU · band ray marching</option><option value="backend">Backend GPU · band ray marching</option></select>
+        <div id="volume-controls" hidden>
+          <div id="backend-access" hidden><label for="backend-access-key">BACKEND GPU ACCESS KEY</label><input id="backend-access-key" type="password" autocomplete="off" placeholder="From var/backend-preview.key"><p class="muted compact">Remote access requires the server key. Use HTTPS, a VPN or an SSH tunnel to protect it in transit.</p></div>
+          <p id="backend-frame-status" class="muted compact" hidden></p>
+          <div class="rgb-bands"><label>Red<select id="preview-red"></select></label><label>Green<select id="preview-green"></select></label><label>Blue<select id="preview-blue"></select></label></div>
+          <button id="preview-use-rgb" class="text-button" type="button">Use observation RGB filters</button>
+          <details class="volume-quality"><summary>Ray quality &amp; volume region</summary>
+          <label class="shader-select" for="preview-resolution"><span>Volume grid</span><select id="preview-resolution" aria-describedby="preview-grid-hint"><option value="64">64³ · fast</option><option value="96">96³ · balanced</option><option value="128">128³ · standard</option><option value="192">192³ · high</option><option value="256" selected>256³ · fine</option><option value="512">512³ · ultra / high memory</option></select></label>
+          <label class="shader-select" for="preview-span"><span>Cube width · kpc</span><input id="preview-span" type="number" min="0.1" max="10000" step="0.1" value="60"></label>
+          <p id="preview-grid-hint" class="muted compact" role="status"></p>
+          <label class="shader-select" for="preview-kernel"><span>Kernel support ×</span><input id="preview-kernel" type="number" min="0.1" max="8" step="0.05" value="0.5"></label>
+          <p class="muted compact">1× uses the neighbour radius. Smaller kernels remain limited by voxel size; use a narrower cube for closer detail.</p>
+          <label class="shader-select" for="preview-steps"><span>Ray steps</span><select id="preview-steps"><option value="96">96 · fast</option><option value="192" selected>192 · balanced</option><option value="384">384 · fine</option></select></label>
+          <label class="shader-select" for="preview-scale"><span>Pixel quality</span><select id="preview-scale"><option value="0.5">Half resolution</option><option value="0.75" selected>75% resolution</option><option value="1">Full resolution</option></select></label>
+          </details>
+          <label class="preview-dust"><input id="preview-dust" type="checkbox" checked>Diffuse dust extinction</label>
+          <div class="angle-control"><label for="preview-dust-scale">Dust strength</label><input id="preview-dust-scale" type="range" min="0" max="4" step="0.05" value="1"><output id="preview-dust-value">1.00×</output></div>
+          <button id="preview-rebuild" type="button" class="text-button">Build / update around camera target</button>
+          <p id="preview-status" class="muted compact" role="status">Rendering runs on this browser's GPU. Eight samples accumulate when the view is still.</p>
+          <details class="preview-limits"><summary>Preview physics and limits</summary><p id="preview-limits">Band emission and diffuse extinction only. Mean Milky Way opacity; no scattered light or diffuse dust/PAH emission. A cropped finite-resolution volume, not a calibrated SKIRT image. Dust controls here never change a SKIRT observation.</p></details>
+        </div>
+        <div class="angle-control"><label for="brightness">Preview exposure</label><input id="brightness" type="range" min="-2" max="1" value="0.38" step="0.01" title="Logarithmic display exposure, with a minimum about 10,000× fainter than before; does not affect SKIRT photometry"></div>
+        <details class="shader-controls">
+          <summary>Preview shader controls</summary>
+          <div class="angle-control"><label for="shader-stellar-kernel">Stellar kernel</label><input id="shader-stellar-kernel" type="range" min="0.1" max="8" value="1" step="0.1"><output id="shader-stellar-kernel-value">1.0×</output></div>
+          <div class="angle-control"><label for="shader-diffuse-kernel">Gas / dust kernel</label><input id="shader-diffuse-kernel" type="range" min="0.5" max="8" value="1.5" step="0.1"><output id="shader-diffuse-kernel-value">1.5×</output></div>
+          <div class="angle-control"><label for="shader-psf">PSF softness</label><input id="shader-psf" type="range" min="0" max="8" value="0" step="0.25"><output id="shader-psf-value">0 px</output></div>
+          <div class="angle-control"><label for="shader-structure">Structure</label><input id="shader-structure" type="range" min="0" max="3" value="0" step="0.1"><output id="shader-structure-value">0.0×</output></div>
+          <label class="shader-select" for="shader-stretch"><span>Stretch</span><select id="shader-stretch"><option value="0">Linear</option><option value="1">Log</option><option value="2">Asinh</option></select></label>
+          <button id="reset-shader" class="text-button" type="button">↺ Reset shader</button>
+          <p>Stellar and gas/dust kernel sliders control the diagnostic view. The volume has its own support multiplier. PSF, stretch, structure and exposure affect both previews; none change SKIRT.</p>
+        </details>
+        <div class="section-divider"></div>
+        <div class="panel-heading"><span class="step">02</span><h2>Compose the frame</h2></div>
+        <div class="preset-row" aria-label="Camera presets"><button data-preset="xy">XY</button><button data-preset="xz">XZ</button><button data-preset="yz">YZ</button><button data-preset="oblique" class="selected">Oblique</button></div>
+        <div class="range-heading"><label for="fov">FIELD OF VIEW</label><span><input id="fov-value" aria-label="Field of view in kpc" type="number" min="0.1" max="500" step="0.1" value="60"> kpc</span></div>
+        <input type="range" id="fov" min="1" max="200" step="0.1" value="60"><div class="range-ends"><span>Close detail</span><span>Wide field</span></div>
+        <div class="angle-control"><label for="inclination">Inclination</label><input type="range" id="inclination" min="0" max="180" step="0.1" value="55"><output id="inclination-value">55°</output></div>
+        <div class="angle-control"><label for="azimuth">Azimuth</label><input type="range" id="azimuth" min="-180" max="180" step="0.1" value="35"><output id="azimuth-value">35°</output></div>
+        <div class="angle-control"><label for="roll">Roll</label><input type="range" id="roll" min="-180" max="180" step="0.1" value="0"><output id="roll-value">0°</output></div>
+        <details class="target-details"><summary>Target position <span>kpc</span></summary><div class="target-inputs"><label>X<input id="target-x" type="number" value="0" min="-1000" max="1000" step="0.1"></label><label>Y<input id="target-y" type="number" value="0" min="-1000" max="1000" step="0.1"></label><label>Z<input id="target-z" type="number" value="0" min="-1000" max="1000" step="0.1"></label></div></details>
+        <button id="reset-camera" class="text-button">↺ Reset camera</button>
+        <p class="camera-note" id="camera-note">Distant observer · square physical FOV</p>
+      </aside>
+      <section class="scene-panel" aria-label="3D galaxy viewer">
+        <div class="scene-toolbar"><div class="view-tabs"><button id="scene-mode" class="active">3D scene</button><button id="camera-mode">Camera view</button></div><div class="scene-actions"><button id="pick-target" title="Click a galaxy or companion to make it the 3D observation center">⌖ Pick center</button><button id="capture-camera" title="Position the observation camera using your current 3D view">◎ Use this view</button></div></div>
+        <div id="viewport" tabindex="0" aria-label="Interactive galaxy; drag to orbit, scroll to zoom, right-drag to pan"></div>
+        <div class="scene-topline"><span id="scene-name">Loading galaxy</span><span id="scene-coordinate">PHYSICAL SPACE · kpc</span></div>
+        <div id="cloud-loading" class="cloud-loading"><div class="orbit-loader"></div><strong>Opening the catalogue</strong><span>Preparing the 3D particle field…</span></div>
+        <div id="frame-guide" class="frame-guide" hidden><i></i><i></i><i></i><i></i><span>OBSERVATION FRAME</span><b>+</b></div>
+        <div class="scene-bottomline"><div><span class="keycap">DRAG</span><span id="navigation-hint">Orbit scene</span><span class="keycap">SCROLL</span><span id="zoom-hint">Zoom scene</span><span class="keycap">RIGHT DRAG</span><span>Pan</span></div><button id="toggle-grid" aria-pressed="true">Grid on</button></div>
+        <div class="preview-inset" id="preview-inset"><div><span>CAMERA PREVIEW</span><span class="live-dot">LIVE</span></div><div id="mini-viewport"></div><div class="mini-caption"><span id="preview-fov">60 × 60 kpc</span><span>Catalogue projection</span></div></div>
+        <div id="scene-stats" class="scene-stats"></div>
+      </section>
+      <aside class="observation panel">
+        <div class="panel-heading"><span class="step">03</span><h2>Make an observation</h2></div>
+        <fieldset class="instrument-picker"><legend>INSTRUMENTS · SELECT ONE OR MORE</legend>
+          <label><input id="instrument-image" data-instrument="image" type="checkbox" checked><span><strong>Broadband image</strong><small>One selected filter</small></span></label>
+          <label><input id="instrument-rgb" data-instrument="rgb" type="checkbox"><span><strong>RGB image</strong><small>Three selected filters</small></span></label>
+          <label><input id="instrument-sed" data-instrument="sed" type="checkbox"><span><strong>Integrated SED</strong><small>Whole-model spectrum</small></span></label>
+        </fieldset>
+        <div id="band-settings"><label for="band">BROADBAND FILTER</label><select id="band" disabled><option>Loading filters…</option></select><div class="band-info"><span id="band-pivot">— μm</span><span id="band-frame">Observer frame</span></div></div>
+        <div id="rgb-settings" hidden><label>RGB CHANNEL FILTERS</label><div class="rgb-bands"><label><span class="channel-dot red"></span>Red<select id="rgb-red" disabled><option>Loading filters…</option></select></label><label><span class="channel-dot green"></span>Green<select id="rgb-green" disabled><option>Loading filters…</option></select></label><label><span class="channel-dot blue"></span>Blue<select id="rgb-blue" disabled><option>Loading filters…</option></select></label></div><p id="rgb-band-info" class="spectral-range">Choose three distinct filters. The original three-plane FITS cube is preserved.</p></div>
+        <div id="spectral-settings" hidden><label for="spectral-mode">SPECTRAL MODE</label><select id="spectral-mode" disabled><option>Loading spectral modes…</option></select>
+          <label for="spectral-resolution" class="resolution-label">SED RESOLVING POWER · R</label>
+          <div class="resolution-control"><input id="spectral-resolution" type="number" min="10" max="10000" step="1" value="100" required aria-describedby="resolution-hint"><button id="reset-resolution" type="button" title="Restore this spectral mode's default resolving power">Preset R</button></div>
+          <p id="resolution-hint" class="spectral-range"></p>
+          <p id="spectral-range" class="spectral-range"></p><p class="spectral-scope">Whole-model SED in this viewing direction. Image FOV and target offsets do not crop it.</p><p class="spectral-approximation">Idealized constant R, not a calibrated instrument response. Higher R adds samples, not missing template detail. Native templates and dust grids may be coarser.</p></div>
+        <div id="model-region-settings" hidden><label for="model-fov">PHYSICAL MODEL REGION</label><div class="resolution-control"><input id="model-fov" type="number" min="0.1" max="10000" step="0.1" value="300" required><span class="unit-suffix">kpc</span></div><p class="spectral-range">3D cube exported around the camera target. Must be at least the image FOV. Larger regions retain more external illumination and cost more memory.</p></div>
+        <div class="output-settings"><div><label for="quality">PHOTON BUDGET</label><select id="quality"><option value="preview">Preview · 1M</option><option value="standard" selected>Standard · 10M</option><option value="deep">Deep · 100M</option><option value="billion">Ultra · 1B</option><option value="ten_billion">Extreme · 10B</option></select></div><div id="pixel-settings"><label for="pixels">IMAGE SIZE</label><select id="pixels"><option value="256">256 × 256</option><option value="512" selected>512 × 512</option><option value="1024">1024 × 1024</option></select></div></div>
+        <fieldset class="instrument-picker"><legend>KINEMATICS</legend><label title="Resolved stellar and star-forming gas velocities relative to the model's mass-weighted stellar velocity; no unresolved dispersion."><input id="source-velocities" type="checkbox"><span><strong>Source velocities</strong><small>Stationary diffuse dust</small></span></label></fieldset>
+        <button id="render" class="render-button" disabled><span>✦</span><span id="render-label">Render with SKIRTGPU</span><span>↗</span></button>
+        <p class="render-note" id="render-note">Full catalogue · dust radiative transfer</p>
+        <div class="result-heading"><h3>Observation</h3><span id="result-state">READY TO COMPOSE</span></div>
+        <div id="product-tabs" class="product-tabs" hidden><button data-product="image">Broadband</button><button data-product="rgb">RGB</button><button data-product="sed">SED</button></div>
+        <div class="result-image" id="result-image"><div class="result-empty" id="result-empty"><span class="empty-aperture">◎</span><strong>Your light, collected.</strong><p>Set the camera and a filter.<br>Your rendered galaxy will appear here.</p></div><img id="rendered-image" alt="SKIRTGPU broadband observation" hidden><div class="render-loading" id="render-loading" hidden><div class="orbit-loader"></div><strong id="job-phase">Waiting for GPU worker</strong><span id="job-timer">0s elapsed</span><div class="progress-track"><div id="job-progress"></div></div><button id="cancel" class="cancel-button">Cancel observation</button></div></div>
+        <div id="result-details" class="result-details" aria-live="polite"></div>
+        <p id="stale-notice" class="stale-notice" hidden>Camera or settings changed. Render again to observe this view.</p>
+        <div class="artifact-links" id="artifact-links" hidden><a id="download-fits">↓ FITS</a><a id="download-png" download="observation.png">↓ PNG</a><a id="download-csv" hidden>↓ CSV</a><a id="download-sed" hidden>↓ Raw SED</a><a id="download-manifest">Settings ↗</a><button id="restore-camera">Restore view</button><button id="explore-spectrum" hidden>Explore spectrum ↓</button></div>
+        <details id="execution-details" hidden><summary>Render details & log</summary><p id="render-warnings"></p><pre id="job-log"></pre></details>
+        <div class="science-note"><span>i</span><p>Diagnostic mode shows age-coloured stellar kernels and purple gas. Band mode ray-marches full-catalogue emissivity and dust mass regridded into a cropped volume, using SKIRT stellar spectra and filter curves. Its mean-opacity extinction omits scattering and diffuse dust emission; it is not a calibrated SKIRT render. All preview controls leave simulation inputs, original FITS, and spectral values unchanged.</p></div>
+      </aside>
+    </div>
+    <section id="spectrum-section" class="spectrum-section" aria-label="Interactive spectral energy distribution" hidden>
+      <div class="spectrum-heading"><div><p class="eyebrow">INTEGRATED SPECTRAL ENERGY DISTRIBUTION</p><h2 id="spectrum-title">Spectrum</h2><p id="spectrum-description"></p></div><div class="spectrum-tools"><label><input id="spectrum-raw" type="checkbox">Show raw</label><button id="spectrum-scale" aria-pressed="true">Log flux</button><button id="spectrum-reset">Reset zoom</button></div></div>
+      <div id="spectrum-chart" class="spectrum-chart"></div>
+      <div class="spectrum-feature-tools" aria-label="Spectral reference groups">
+        <label><input data-feature-group="atomic" type="checkbox" checked><span class="feature-swatch atomic"></span>Ionized gas</label>
+        <label><input data-feature-group="molecular" type="checkbox" checked><span class="feature-swatch molecular"></span>Molecular H2</label>
+        <label><input data-feature-group="pah" type="checkbox" checked><span class="feature-swatch pah"></span>PAH bands</label>
+        <label><input data-feature-group="dust" type="checkbox" checked><span class="feature-swatch dust"></span>Silicate dust</label>
+      </div>
+      <p id="spectrum-feature-status" class="spectrum-feature-status"></p>
+      <div class="spectrum-reference">
+        <label for="spectrum-feature-select">Reference feature<select id="spectrum-feature-select"><option value="">Select a reference feature</option></select></label>
+        <div id="spectrum-feature-details" aria-live="polite"></div>
+      </div>
+      <div class="spectrum-footer"><span id="spectrum-readout" aria-live="polite">Hover to inspect · drag horizontally to zoom</span><span>Raw SKIRT + ideal constant-R Gaussian · λFλ in W/m²</span></div>
+    </section>
+    <section class="history-section"><div class="history-heading"><h2>Observation history <span id="history-count">0</span></h2><span>Every perspective, saved.</span></div><div id="history" class="history"><p class="history-empty">Your observations will collect here. Change the angle, try another filter, and compare.</p></div></section>
+    <footer><span><span class="status-dot"></span>SKIRTGPU OBSERVATORY</span><span id="model-note">Real particle catalogues. Monte Carlo radiative transfer.</span><span>EXPLORE → COMPOSE → OBSERVE</span></footer>
+  </main>
+</body>
+</html>

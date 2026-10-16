@@ -724,7 +724,7 @@ private:
         GPU batch for the observer-direction extinction optical depths. It supports the
         consolidated, no-wavelength-change peel-off path for distant instruments and returns false
         for unsupported configurations so callers can fall back to peelOffScattering(). */
-    bool peelOffScatteringBatch(const vector<PhotonPacket*>& ppv);
+    bool peelOffScatteringBatch(const vector<PhotonPacket*>& ppv, size_t lifeCycleBatchSize);
 
     /** This function attempts a stricter direct Henyey-Greenstein GPU scattering peel-off path
         for total-only distant frame instruments. It bypasses peel-off PhotonPacket construction

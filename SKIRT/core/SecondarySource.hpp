@@ -8,6 +8,7 @@
 
 #include "SimulationItem.hpp"
 class PhotonPacket;
+struct GpuSourceLaunchData;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -50,6 +51,15 @@ public:
         The default implementation calls launch() for each packet; subclasses can override it to
         reuse source-specific mapping work across adjacent history indices. */
     virtual void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const;
+
+    /** This function attempts to generate packed isotropic, unpolarized launch states for a
+        resident GPU lifecycle. The default implementation returns false. */
+    virtual bool launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets,
+                                 double L) const;
+
+    /** This function returns prepared source metadata for direct resident GPU launch, or null when
+        the source does not support that path. */
+    virtual const GpuSourceLaunchData* gpuSourceLaunchData() const;
 };
 
 ////////////////////////////////////////////////////////////////

@@ -5,9 +5,11 @@
 
 #include "FluxRecorder.hpp"
 #include "BandWavelengthGrid.hpp"
-#include "FatalError.hpp"
+#include "DisjointWavelengthGrid.hpp"
 #include "FITSInOut.hpp"
+#include "FatalError.hpp"
 #include "GpuAcceleration.hpp"
+#include "GpuDetectorInfo.hpp"
 #include "Indices.hpp"
 #include "LockFree.hpp"
 #include "Log.hpp"
@@ -92,6 +94,15 @@ namespace
                && std::strcmp(value, "FALSE") != 0 && std::strcmp(value, "off") != 0
                && std::strcmp(value, "OFF") != 0 && std::strcmp(value, "no") != 0
                && std::strcmp(value, "NO") != 0;
+    }
+
+    bool fusedScatterDetectorEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_BATCH_SCATTER_PEEL_DETECTOR_FUSED");
+        if (!value) return true;
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0
+               && std::strcmp(value, "FALSE") != 0 && std::strcmp(value, "off") != 0 && std::strcmp(value, "OFF") != 0
+               && std::strcmp(value, "no") != 0 && std::strcmp(value, "NO") != 0;
     }
 
     void scaleWavelengthArray(Array& array, const vector<double>& factorv)
@@ -593,6 +604,66 @@ bool FluxRecorder::detectTotalBatch(const vector<PhotonPacket*>& ppv, const vect
 
 ////////////////////////////////////////////////////////////////////
 
+bool FluxRecorder::detectTotalBatch(const vector<PhotonPacket*>& ppv)
+{
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeFluxDensity || _includeSurfaceBrightness || _includeLightCurve || _includeSpectralTimeMap || _local)
+        return false;
+
+    vector<int> keyv;
+    vector<double> valuev;
+    keyv.reserve(ppv.size());
+    valuev.reserve(ppv.size());
+    for (PhotonPacket* pp : ppv)
+    {
+        if (!pp) continue;
+
+        double wavelength = pp->wavelength() * (1. + _redshift);
+        for (int ell : _lambdagrid->bins(wavelength))
+        {
+            double Lext = pp->luminosity() * _lambdagrid->transmission(ell, wavelength);
+            if (_hasMedium)
+            {
+                if (!pp->hasObservedOpticalDepth()) return false;
+                Lext *= exp(-pp->observedOpticalDepth());
+            }
+            keyv.push_back(ell);
+            valuev.push_back(Lext);
+        }
+    }
+    if (keyv.empty()) return true;
+
+    Array& total = _sed[Total];
+    size_t totalSize = total.size();
+    if (detectorAccumulatorEnabled() && GpuAcceleration::isProcessEnabled())
+    {
+        if (GpuAcceleration::accumulateValuesByKey(&total, totalSize, keyv, valuev)) return true;
+        throw FATALERROR("GPU SED detector accumulator update failed: " + GpuAcceleration::status());
+    }
+
+    vector<int> compactKeyv;
+    vector<double> compactValuev;
+    if (GpuAcceleration::sumValuesByKey(keyv, valuev, compactKeyv, compactValuev)
+        && compactKeyv.size() == compactValuev.size())
+    {
+        for (size_t i = 0; i != compactKeyv.size(); ++i)
+        {
+            int key = compactKeyv[i];
+            if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], compactValuev[i]);
+        }
+        return true;
+    }
+
+    for (size_t i = 0; i != keyv.size(); ++i)
+    {
+        int key = keyv[i];
+        if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], valuev[i]);
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
 bool FluxRecorder::detectTotalBatch(const vector<int>& pixelv, const vector<double>& wavelengthv,
                                     const vector<double>& luminosityv, const vector<double>& tauv)
 {
@@ -651,6 +722,132 @@ bool FluxRecorder::detectTotalBatch(const vector<int>& pixelv, const vector<doub
         if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], valuev[i]);
     }
     return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::detectTotalBatch(const vector<double>& wavelengthv, const vector<double>& luminosityv,
+                                    const vector<double>& tauv)
+{
+    if (wavelengthv.size() != luminosityv.size()) return false;
+    if (_hasMedium && tauv.size() != wavelengthv.size()) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeFluxDensity || _includeSurfaceBrightness || _includeLightCurve || _includeSpectralTimeMap || _local)
+        return false;
+
+    vector<int> keyv;
+    vector<double> valuev;
+    keyv.reserve(wavelengthv.size());
+    valuev.reserve(wavelengthv.size());
+    for (size_t i = 0; i != wavelengthv.size(); ++i)
+    {
+        double luminosity = luminosityv[i];
+        if (luminosity <= 0.) continue;
+
+        double wavelength = wavelengthv[i] * (1. + _redshift);
+        for (int ell : _lambdagrid->bins(wavelength))
+        {
+            double Lext = luminosity * _lambdagrid->transmission(ell, wavelength);
+            if (_hasMedium) Lext *= exp(-tauv[i]);
+            keyv.push_back(ell);
+            valuev.push_back(Lext);
+        }
+    }
+    if (keyv.empty()) return true;
+
+    Array& total = _sed[Total];
+    size_t totalSize = total.size();
+    if (detectorAccumulatorEnabled() && GpuAcceleration::isProcessEnabled())
+    {
+        if (GpuAcceleration::accumulateValuesByKey(&total, totalSize, keyv, valuev)) return true;
+        throw FATALERROR("GPU SED detector accumulator update failed: " + GpuAcceleration::status());
+    }
+
+    vector<int> compactKeyv;
+    vector<double> compactValuev;
+    if (GpuAcceleration::sumValuesByKey(keyv, valuev, compactKeyv, compactValuev)
+        && compactKeyv.size() == compactValuev.size())
+    {
+        for (size_t i = 0; i != compactKeyv.size(); ++i)
+        {
+            int key = compactKeyv[i];
+            if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], compactValuev[i]);
+        }
+        return true;
+    }
+
+    for (size_t i = 0; i != keyv.size(); ++i)
+    {
+        int key = keyv[i];
+        if (key >= 0 && static_cast<size_t>(key) < totalSize) LockFree::add(total[key], valuev[i]);
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::getGpuFrameDetectorInfo(GpuFrameDetectorInfo& info)
+{
+    info = GpuFrameDetectorInfo();
+    if (!_hasMedium || !_ms) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeSurfaceBrightness || _includeFluxDensity || _local) return false;
+
+    const auto* bandGrid = dynamic_cast<const BandWavelengthGrid*>(_lambdagrid);
+    if (!bandGrid) return false;
+
+    int numBands = bandGrid->numBins();
+    if (numBands <= 0) return false;
+    info.bandOffsetv.reserve(static_cast<size_t>(numBands) + 1);
+    info.bandWidthv.reserve(numBands);
+    info.bandOffsetv.push_back(0);
+    for (int ell = 0; ell != numBands; ++ell)
+    {
+        const Band* band = bandGrid->band(ell);
+        if (!band || band->transmissionDataSize() < 2 || band->effectiveWidth() <= 0.) return false;
+        size_t size = band->transmissionDataSize();
+        if (info.bandWavelengthv.size() + size > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+        const double* lambdav = band->transmissionWavelengthData();
+        const double* transv = band->transmissionValueData();
+        info.bandWavelengthv.insert(info.bandWavelengthv.end(), lambdav, lambdav + size);
+        info.bandTransmissionv.insert(info.bandTransmissionv.end(), transv, transv + size);
+        info.bandWidthv.push_back(band->effectiveWidth());
+        info.bandOffsetv.push_back(static_cast<int>(info.bandWavelengthv.size()));
+    }
+
+    Array& total = _ifu[Total];
+    info.accumulatorKey = &total;
+    info.numAccumulatorValues = total.size();
+    info.redshift = _redshift;
+    info.numPixelsInFrame = _numPixelsInFrame;
+    return info.accumulatorKey && info.numAccumulatorValues;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool FluxRecorder::getGpuSedDetectorInfo(GpuSedDetectorInfo& info)
+{
+    info = GpuSedDetectorInfo();
+    if (!_hasMedium || !_ms) return false;
+    if (!_recordTotalOnly || _recordPolarization || _recordStatistics) return false;
+    if (!_includeFluxDensity || _includeSurfaceBrightness || _includeLightCurve || _includeSpectralTimeMap || _local)
+        return false;
+
+    const auto* grid = dynamic_cast<const DisjointWavelengthGrid*>(_lambdagrid);
+    if (!grid || grid->numBins() <= 0) return false;
+    info.leftBorderv.reserve(grid->numBins());
+    info.rightBorderv.reserve(grid->numBins());
+    for (int ell = 0; ell != grid->numBins(); ++ell)
+    {
+        info.leftBorderv.push_back(grid->leftBorder(ell));
+        info.rightBorderv.push_back(grid->rightBorder(ell));
+    }
+
+    Array& total = _sed[Total];
+    info.accumulatorKey = &total;
+    info.numAccumulatorValues = total.size();
+    info.redshift = _redshift;
+    return info.accumulatorKey && info.numAccumulatorValues == info.leftBorderv.size();
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -758,11 +955,12 @@ bool FluxRecorder::supportsObservedFrameBandBatch() const
 
 ////////////////////////////////////////////////////////////////////
 
-bool FluxRecorder::detectObservedFrameBandBatch(
-    const vector<Position>& positionv, const vector<double>& wavelengthv, const vector<double>& luminosityv,
-    const Direction& bfkobs, double costheta, double sintheta, double cosphi, double sinphi,
-    double cosomega, double sinomega, int numPixelsX, int numPixelsY, double xpmin, double xpsiz,
-    double ypmin, double ypsiz)
+bool FluxRecorder::detectObservedFrameBandBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                                                const vector<double>& luminosityv, const Direction& bfkobs,
+                                                double costheta, double sintheta, double cosphi, double sinphi,
+                                                double cosomega, double sinomega, int numPixelsX, int numPixelsY,
+                                                double xpmin, double xpsiz, double ypmin, double ypsiz,
+                                                vector<double>* tauOutv)
 {
     if (!supportsObservedFrameBandBatch()) return false;
     if (positionv.size() != wavelengthv.size() || positionv.size() != luminosityv.size()) return false;
@@ -797,9 +995,9 @@ bool FluxRecorder::detectObservedFrameBandBatch(
     Array& total = _ifu[Total];
     vector<double> distancev(positionv.size(), std::numeric_limits<double>::infinity());
     return _ms->observedFrameBandAccumulate(
-        positionv, wavelengthv, luminosityv, bfkobs, distancev, &total, total.size(), costheta, sintheta,
-        cosphi, sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz, ypmin, ypsiz,
-        _redshift, _numPixelsInFrame, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv);
+        positionv, wavelengthv, luminosityv, bfkobs, distancev, &total, total.size(), costheta, sintheta, cosphi,
+        sinphi, cosomega, sinomega, numPixelsX, numPixelsY, xpmin, xpsiz, ypmin, ypsiz, _redshift, _numPixelsInFrame,
+        bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv, tauOutv);
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -862,12 +1060,16 @@ void FluxRecorder::flush()
         contributionList->reset();
     }
 
-    if ((detectorAccumulatorEnabled() || frameBandDetectorDirectEnabled())
-        && _recordTotalOnly && !_recordPolarization && !_recordStatistics
-        && _includeSurfaceBrightness && !_includeFluxDensity && !_local && _ifu[Total].size()
-        && GpuAcceleration::isProcessEnabled()
-        && !GpuAcceleration::retrieveAndClearAccumulatedValues(&_ifu[Total], begin(_ifu[Total]),
-                                                               _ifu[Total].size()))
+    if ((detectorAccumulatorEnabled() || fusedScatterDetectorEnabled()) && _recordTotalOnly && !_recordPolarization
+        && !_recordStatistics && _includeFluxDensity && !_includeSurfaceBrightness && !_includeLightCurve
+        && !_includeSpectralTimeMap && !_local && _sed[Total].size() && GpuAcceleration::isProcessEnabled()
+        && !GpuAcceleration::retrieveAndClearAccumulatedValues(&_sed[Total], begin(_sed[Total]), _sed[Total].size()))
+        throw FATALERROR("GPU SED detector accumulator flush failed: " + GpuAcceleration::status());
+
+    if ((detectorAccumulatorEnabled() || frameBandDetectorDirectEnabled() || fusedScatterDetectorEnabled())
+        && _recordTotalOnly && !_recordPolarization && !_recordStatistics && _includeSurfaceBrightness
+        && !_includeFluxDensity && !_local && _ifu[Total].size() && GpuAcceleration::isProcessEnabled()
+        && !GpuAcceleration::retrieveAndClearAccumulatedValues(&_ifu[Total], begin(_ifu[Total]), _ifu[Total].size()))
         throw FATALERROR("GPU frame-band detector accumulator flush failed: " + GpuAcceleration::status());
 }
 

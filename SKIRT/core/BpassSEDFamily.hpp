@@ -118,6 +118,15 @@ public:
     double cdf(Array& lambdav, Array& pv, Array& Pv, const Range& wavelengthRange,
                const Array& parameters) const override;
 
+    /** Integrates source luminosities in GPU batches, with the scalar path as fallback. */
+    bool cdfBatch(vector<double>& luminosities, const Range& wavelengthRange,
+                  const vector<double>& flattenedParameters, size_t numEntities) const override;
+
+    /** Exposes the underlying stored table and the metallicity and age coordinates for GPU source
+        spectrum construction. */
+    bool gpuSpectrumTable(GpuSourceSpectrumTable& table, const vector<double>& flattenedParameters,
+                          size_t numEntities) const override;
+
     //====================== Data members =====================
 
 private:

@@ -82,8 +82,8 @@ public:
         packet's wavelength is Doppler shifted corresponding to its emission direction. If the
         PolarizationStateInterface is specified, the packet's polarization state is set according
         to its emission direction; otherwise the polarization state is set to unpolarized. The
-        AngularDistributionInterface is not used by this function, but pointers to all three
-        interfaces are stored in data members for use by the launchEmissionPeelOff() function.
+        AngularDistributionInterface is not used by this function. The velocity value and pointers
+        to the angular and polarization interfaces are retained for launchEmissionPeelOff().
 
         The emission origin is set to an invalid value, which should be overridden by calling the
         setPrimaryOrigin() or the setSecondaryOrigin() function. The number of scattering events is
@@ -118,7 +118,7 @@ public:
         from the base photon packet to the peel off photon packet, updates the peel off direction,
         and honors some extra source properties tracked by the base photon packet as follows.
 
-        If the base packet has a VelocityInterface (i.e. if it is not the null pointer), then
+        If the base packet has a nonzero captured source velocity, then
         the peel-off packet's wavelength is Doppler shifted corresponding to its propagation
         direction. If the base packet has an AngularDistributionInterface, a bias for the
         probability of the peel-off propagation direction is applied to the peel-off packet's
@@ -205,7 +205,12 @@ public:
 
     /** This function returns true if emission peel-off may alter wavelength, luminosity, or
         polarization beyond simply copying the packet and changing its direction. */
-    bool hasEmissionPeelOffAdjustments() const { return _bvi || _adi || _ppi; }
+    bool hasEmissionPeelOffAdjustments() const { return !_emissionVelocity.isNull() || _adi || _ppi; }
+
+    /** Moving isotropic sources are supported by the resident GPU emission detector. */
+    bool hasNonVelocityEmissionAdjustments() const { return _adi || _ppi; }
+    Vec emissionVelocity() const { return _emissionVelocity; }
+    double sourceRestWavelength() const { return _lambda0; }
 
     // ------- Calculating Doppler shifts -------
 
@@ -346,7 +351,8 @@ private:
 
     // physical information on radiation source; the interfaces are not used in peel-off photon packets
     double _lambda0{0};  // original wavelength in the rest-frame of the source
-    VelocityInterface* _bvi{nullptr};
+    // Own the launch velocity: source interfaces may be reused before a batch is detected.
+    Vec _emissionVelocity;
     AngularDistributionInterface* _adi{nullptr};
     PolarizationProfileInterface* _ppi{nullptr};
 

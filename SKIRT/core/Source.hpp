@@ -11,6 +11,7 @@
 #include "WavelengthDistribution.hpp"
 class PhotonPacket;
 class Random;
+struct GpuSourceLaunchData;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -131,6 +132,18 @@ public:
         implementation invokes launch() for each packet; subclasses can override this to reuse
         per-range setup or to offload batch launch preparation. */
     virtual void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const;
+
+    /** This function attempts to generate a contiguous range of isotropic, unpolarized packet
+        launch states in a packed array. Each packet occupies eight consecutive doubles containing
+        position, direction, wavelength, and luminosity. The default implementation returns false;
+        optimized sources can override it for a resident GPU lifecycle that does not need full
+        PhotonPacket objects. */
+    virtual bool launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets,
+                                 double L) const;
+
+    /** This function returns prepared immutable GPU source-launch metadata, or null when the source
+        does not support device-resident packet generation for the current launch segment. */
+    virtual const GpuSourceLaunchData* gpuSourceLaunchData() const;
 
     //======================== Other Functions =======================
 

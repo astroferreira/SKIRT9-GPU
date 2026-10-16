@@ -7,6 +7,7 @@
 #define IMPORTEDSOURCE_HPP
 
 #include "Array.hpp"
+#include "GpuSourceLaunchData.hpp"
 #include "Range.hpp"
 #include "SEDFamily.hpp"
 #include "Source.hpp"
@@ -227,6 +228,13 @@ public:
     /** This function launches a contiguous history-index range from this imported source. */
     void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const override;
 
+    /** This function generates packed launch states with the custom GPU imported-source sampler. */
+    bool launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets,
+                         double L) const override;
+
+    /** This function returns the prepared imported-source metadata for direct resident launch. */
+    const GpuSourceLaunchData* gpuSourceLaunchData() const override;
+
     /** This function returns (a pointer to) the snapshot object associated with this imported
         source. It is intended to provide InputModelProbe instances with direct access to the
         snapshot for probing imported information that is not otherwise made available to the
@@ -235,6 +243,9 @@ public:
     const Snapshot* snapshot() const;
 
 private:
+    /** Prepares reusable per-entity spectra and launch metadata for the GPU source sampler. */
+    bool prepareGpuSourceLaunchData(size_t firstIndex, size_t numIndices);
+
     /** This function precomputes launch wavelengths and spectral bias weights for the specified
         history-index range using an optional SED-family batch implementation. */
     bool prepareGpuLaunchSpectra(size_t firstIndex, size_t numIndices);
@@ -268,6 +279,11 @@ private:
     size_t _launchSpectraFirstIndex{0};
     vector<double> _launchWavelengthv;
     vector<double> _launchSpectralWeightv;
+
+    // initialized by prepareForLaunch() for production-sized supported GPU particle sources
+    GpuSourceLaunchData _gpuSourceLaunchData;
+    bool _hasGpuSourceLaunchData{false};
+    bool _gpuSourceSpectraReady{false};
 };
 
 //////////////////////////////////////////////////////////////////////

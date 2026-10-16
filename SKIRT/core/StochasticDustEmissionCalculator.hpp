@@ -8,6 +8,9 @@
 
 #include "Array.hpp"
 #include "StoredTable.hpp"
+#include <memory>
+#include <mutex>
+struct GpuStochasticDustData;
 class SimulationItem;
 class SDE_Calculator;
 class SDE_TemperatureGrid;
@@ -87,6 +90,8 @@ class SDE_TemperatureGrid;
 class StochasticDustEmissionCalculator
 {
 public:
+    StochasticDustEmissionCalculator();
+
     /** The destructor destructs the data structures allocated by the precalculate() function. */
     ~StochasticDustEmissionCalculator();
 
@@ -130,9 +135,15 @@ public:
         not been called for at least one bin, the behavior of this function is undefined. */
     Array emissivity(const Array& Jv) const;
 
+    /** GPU emissivities for cell-major radiation fields, retaining the scalar model's grid
+        selection and equilibrium shortcuts. Returns false when the GPU path is unavailable. */
+    bool emissivityBatch(const vector<double>& radiationFields, size_t numCells, vector<double>& spectra) const;
+
     //======================== Data Members ========================
 
 private:
+    mutable std::once_flag _gpuDataOnce;
+    mutable std::unique_ptr<GpuStochasticDustData> _gpuData;
     // wavelength grids and CMB
     Array _rflambdav;   // radiation field wavelength grid (RFWLG) -- indexed on k
     Array _rfdlambdav;  // radiation field wavelength grid bin widths -- indexed on k

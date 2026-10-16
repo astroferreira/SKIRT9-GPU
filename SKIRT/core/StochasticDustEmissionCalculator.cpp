@@ -7,6 +7,8 @@
 #include "ArrayTable.hpp"
 #include "Configuration.hpp"
 #include "Constants.hpp"
+#include "GpuAcceleration.hpp"
+#include "GpuStochasticDustData.hpp"
 #include "DisjointWavelengthGrid.hpp"
 #include "NR.hpp"
 #include "Parallel.hpp"
@@ -14,6 +16,8 @@
 #include "PlanckFunction.hpp"
 #include "ProcessManager.hpp"
 #include <unordered_map>
+#include <atomic>
+#include <algorithm>
 
 ////////////////////////////////////////////////////////////////////
 
@@ -112,6 +116,27 @@ private:
     Array _emsigmaabsv;        // cross sections on dust emission wavelength grid (indexed on ell)
 
 public:
+    // the GPU kernel walks the lower triangle by column (i), so each column's rows (f > i) are contiguous
+    void appendGpuRates(GpuStochasticDustData& data) const
+    {
+        size_t n = _grid->_Tv.size();
+        for (size_t i = 0; i + 1 < n; ++i)
+            for (size_t f = i + 1; f != n; ++f)
+            {
+                short k = _Km(f, i);
+                data.heatingBinv.push_back(k);
+                data.heatingv.push_back(k >= 0 ? _HRm(f, i) : 0.);
+            }
+        data.coolingv.insert(data.coolingv.end(), begin(_CRv), end(_CRv));
+        data.planckAbsv.insert(data.planckAbsv.end(), begin(_planckabsv), end(_planckabsv));
+    }
+
+    void appendGpuCrossSections(GpuStochasticDustData& data) const
+    {
+        data.rfCrossSectionv.insert(data.rfCrossSectionv.end(), begin(_rfsigmaabsv), end(_rfsigmaabsv));
+        data.emCrossSectionv.insert(data.emCrossSectionv.end(), begin(_emsigmaabsv), end(_emsigmaabsv));
+    }
+
     SDE_Calculator(SimulationItem* item, const SDE_TemperatureGrid* grid, const WavelengthGrid* rfWLG,
                    const Array& rflambdav, const Array& rfdlambdav, const Array& emlambdav, const Array& lambdav,
                    const Array& sigmaabsv, double bulkDensity, double meanMass, const StoredTable<1>& enthalpy)
@@ -137,21 +162,42 @@ public:
         }
         dHv[NT - 1] = Hv[NT - 1] - Hv[NT - 2];
 
-        // calculate the heating rates, barring the dependency on the radiation field
+        // calculate the heating rates, barring the dependency on the radiation field;
+        // the rows are independent and this takes seconds per mix for fine grids, so distribute the rows
+        // like the cooling rates below; bin indices are stored offset by one so that the sum is exact
         double hc = Constants::h() * Constants::c();
+        size_t numTriangle = static_cast<size_t>(NT) * (NT - 1) / 2;
+        Array hrv(numTriangle), kv(numTriangle);
+        item->find<ParallelFactory>()->parallelDistributed()->call(
+            NT - 1, [&hrv, &kv, &Hv, &dHv, &lambdav, &sigmaabsv, rfWLG, hc](size_t firstIndex, size_t numIndices) {
+                for (size_t row = firstIndex; row != firstIndex + numIndices; ++row)
+                {
+                    int f = static_cast<int>(row) + 1;
+                    size_t offset = static_cast<size_t>(f) * (f - 1) / 2;
+                    for (int i = 0; i < f; i++)
+                    {
+                        double Hdiff = Hv[f] - Hv[i];
+                        double lambda = hc / Hdiff;
+                        int k = rfWLG->bin(lambda);
+                        kv[offset + i] = k + 1;
+                        if (k >= 0)
+                        {
+                            double sigmaabs = NR::value<NR::interpolateLogLog>(lambda, lambdav, sigmaabsv);
+                            hrv[offset + i] = hc * sigmaabs * dHv[f] / (Hdiff * Hdiff * Hdiff);
+                        }
+                    }
+                }
+            });
+        ProcessManager::sumToAll(hrv);
+        ProcessManager::sumToAll(kv);
         for (int f = 1; f < NT; f++)
         {
+            size_t offset = static_cast<size_t>(f) * (f - 1) / 2;
             for (int i = 0; i < f; i++)
             {
-                double Hdiff = Hv[f] - Hv[i];
-                double lambda = hc / Hdiff;
-                int k = rfWLG->bin(lambda);
+                int k = static_cast<int>(kv[offset + i]) - 1;
                 _Km(f, i) = k;
-                if (k >= 0)
-                {
-                    double sigmaabs = NR::value<NR::interpolateLogLog>(lambda, lambdav, sigmaabsv);
-                    _HRm(f, i) = hc * sigmaabs * dHv[f] / (Hdiff * Hdiff * Hdiff);
-                }
+                if (k >= 0) _HRm(f, i) = hrv[offset + i];
             }
         }
 
@@ -337,6 +383,8 @@ namespace
 
 ////////////////////////////////////////////////////////////////////
 
+StochasticDustEmissionCalculator::StochasticDustEmissionCalculator() = default;
+
 StochasticDustEmissionCalculator::~StochasticDustEmissionCalculator()
 {
     for (auto calculator : _calculatorsA) delete calculator;
@@ -498,6 +546,70 @@ Array StochasticDustEmissionCalculator::emissivity(const Array& Jv) const
         _calculatorsC[b]->addEquilibrium(ev, Teq);
     }
     return ev;
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool StochasticDustEmissionCalculator::emissivityBatch(const vector<double>& radiationFields, size_t numCells,
+                                                     vector<double>& spectra) const
+{
+    if (!GpuAcceleration::isProcessEnabled() || _calculatorsA.empty() || !numCells
+        || radiationFields.size() != numCells * _rflambdav.size())
+        return false;
+    std::call_once(_gpuDataOnce, [this]() {
+        auto data = std::make_unique<GpuStochasticDustData>();
+        static std::atomic<unsigned long long> nextToken{1};
+        data->cacheToken = nextToken.fetch_add(1);
+        data->numInput = _rflambdav.size();
+        data->numOutput = _emlambdav.size();
+        data->numGrains = _calculatorsA.size();
+        data->planckFactor1 = Constants::h() * Constants::c() / Constants::k();
+        data->planckFactor2 = 2. * Constants::h() * Constants::c() * Constants::c();
+        data->rfWidthv.assign(begin(_rfdlambdav), end(_rfdlambdav));
+        data->cmbv.assign(data->numInput, 0.);
+        if (_Bcmbv.size()) data->cmbv.assign(begin(_Bcmbv), end(_Bcmbv));
+        // wavelengths followed by the Planck prefactor 2hc^2/lambda^5, matching PlanckFunction::value()
+        data->wavelengthv.assign(begin(_emlambdav), end(_emlambdav));
+        for (int ell = 0; ell != data->numOutput; ++ell)
+            data->wavelengthv.push_back(data->planckFactor2 / pow(_emlambdav[ell], 5));
+        data->grainMassv = _meanMasses;
+        data->maxEnthalpyTempv = _maxEnthalpyTemps;
+        data->maxTemperature = Tuppermax;
+        data->equilibriumWidth = deltaTeq;
+        data->mediumWidth = deltaTmedium;
+        // bound the probability vector length: grids A and B can use their full size, while grid C is only
+        // used for coarse ranges narrower than deltaTmedium, located on grid C as in SDE_Calculator::calcProbs
+        const Array& Tc = _gridC->_Tv;
+        int sizeC = Tc.size();
+        data->maxCount = static_cast<int>(max(_gridA->_Tv.size(), _gridB->_Tv.size()));
+        for (int offset = 0; offset + 1 < sizeC; ++offset)
+        {
+            int last = NR::locateClip(Tc, Tc[offset + 1] + deltaTmedium);
+            data->maxCount = max(data->maxCount, min(sizeC, last - offset + 2));
+        }
+        for (auto grid : {_gridA, _gridB, _gridC})
+        {
+            data->gridSizev.push_back(grid->_Tv.size());
+            data->temperaturev.insert(data->temperaturev.end(), begin(grid->_Tv), end(grid->_Tv));
+            for (size_t p = 0; p != grid->_Tv.size(); ++p)
+                for (int ell = 0; ell != data->numOutput; ++ell)
+                    data->blackbodyv.push_back(grid->_Bvv(p, ell));
+        }
+        vector<string> types;
+        for (int b = 0; b != data->numGrains; ++b)
+        {
+            auto found = std::find(types.begin(), types.end(), _grainTypes[b]);
+            int type = found - types.begin();
+            if (found == types.end()) types.push_back(_grainTypes[b]);
+            data->grainTypev.push_back(type);
+            _calculatorsC[b]->appendGpuCrossSections(*data);
+            for (auto calculator : {_calculatorsA[b], _calculatorsB[b], _calculatorsC[b]})
+                calculator->appendGpuRates(*data);
+        }
+        data->numTypes = types.size();
+        _gpuData = std::move(data);
+    });
+    return GpuAcceleration::stochasticDustEmission(*_gpuData, radiationFields, numCells, spectra);
 }
 
 ////////////////////////////////////////////////////////////////////

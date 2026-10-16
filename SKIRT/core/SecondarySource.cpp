@@ -25,3 +25,18 @@ void SecondarySource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, s
 }
 
 ////////////////////////////////////////////////////////////////////
+
+bool SecondarySource::launchBatchData(vector<double>& /*packetData*/, size_t /*firstHistoryIndex*/,
+                                      size_t /*numPackets*/, double /*L*/) const
+{
+    return false;
+}
+
+////////////////////////////////////////////////////////////////////
+
+const GpuSourceLaunchData* SecondarySource::gpuSourceLaunchData() const
+{
+    return nullptr;
+}
+
+////////////////////////////////////////////////////////////////////

@@ -103,6 +103,36 @@ bool MappingsSEDFamily::cdfBatch(vector<double>& luminosities, const Range& wave
 
 ////////////////////////////////////////////////////////////////////
 
+bool MappingsSEDFamily::gpuSpectrumTable(GpuSourceSpectrumTable& table,
+                                         const vector<double>& flattenedParameters, size_t numEntities) const
+{
+    table = GpuSourceSpectrumTable();
+    if (!numEntities || flattenedParameters.size() / 5 != numEntities || flattenedParameters.size() % 5)
+        return false;
+
+    table.axes = {_table.axisData<0>(), _table.axisData<1>(), _table.axisData<2>(), _table.axisData<3>(),
+                  _table.axisData<4>()};
+    table.axisSizes = {_table.axisSize<0>(), _table.axisSize<1>(), _table.axisSize<2>(), _table.axisSize<3>(),
+                       _table.axisSize<4>()};
+    table.axisLog = {_table.axisIsLog<0>(), _table.axisIsLog<1>(), _table.axisIsLog<2>(), _table.axisIsLog<3>(),
+                     _table.axisIsLog<4>()};
+    table.values = _table.quantityDataRaw();
+    table.quantityStride = _table.quantityStep();
+    table.quantityLog = _table.quantityIsLog();
+    table.clampWavelength = _table.clampsFirstAxis();
+    table.parameters.resize(4 * numEntities);
+    for (size_t m = 0; m != numEntities; ++m)
+    {
+        table.parameters[4 * m] = flattenedParameters[5 * m + 1];
+        table.parameters[4 * m + 1] = flattenedParameters[5 * m + 2];
+        table.parameters[4 * m + 2] = flattenedParameters[5 * m + 3];
+        table.parameters[4 * m + 3] = flattenedParameters[5 * m + 4];
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////
+
 bool MappingsSEDFamily::sampleWavelengthBatch(vector<double>& wavelengths, vector<double>& specificLuminosities,
                                               const Range& wavelengthRange,
                                               const vector<double>& flattenedParameters,

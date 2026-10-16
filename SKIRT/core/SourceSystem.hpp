@@ -11,6 +11,7 @@
 #include "Source.hpp"
 class PhotonPacket;
 class ProbePhotonPacketInterface;
+struct GpuSourceLaunchData;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -135,6 +136,16 @@ public:
 
     /** This function launches a contiguous range of photon packets from the mapped sources. */
     void launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets) const;
+
+    /** This function attempts to generate packed launch states for a contiguous history-index
+        range. It returns false when a source or an installed launch callback requires normal
+        PhotonPacket objects. */
+    bool launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets) const;
+
+    /** This function exposes prepared GPU metadata and the effective packet luminosity when the
+        complete history-index range maps to one supported source and no launch callback is installed. */
+    bool gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData, double& luminosityPerPacket,
+                             size_t firstHistoryIndex, size_t numPackets) const;
 
     //======================== Data Members ========================
 

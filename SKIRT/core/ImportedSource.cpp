@@ -9,14 +9,17 @@
 #include "FatalError.hpp"
 #include "GpuAcceleration.hpp"
 #include "Log.hpp"
+#include "LogWavelengthDistribution.hpp"
 #include "NR.hpp"
 #include "Parallel.hpp"
 #include "ParallelFactory.hpp"
 #include "PhotonPacket.hpp"
 #include "ProcessManager.hpp"
+#include "ParticleSnapshot.hpp"
 #include "Random.hpp"
 #include "SEDFamily.hpp"
 #include "Snapshot.hpp"
+#include "StringUtils.hpp"
 #include "VelocityInterface.hpp"
 #include "WavelengthGrid.hpp"
 #include <algorithm>
@@ -24,6 +27,8 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
@@ -36,9 +41,27 @@ namespace
     // maximum number of luminosity calculations between two invocations of infoIfElapsed()
     const size_t logProgressChunkSize = 10000;
 
+    bool sourceOptionEnabled(const char* name, bool fallback)
+    {
+        const char* value = std::getenv(name);
+        if (!value) return fallback;
+        string text(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return !(text.empty() || text == "0" || text == "false" || text == "off" || text == "no");
+    }
+
     bool profileLaunchEnabled()
     {
         const char* value = std::getenv("SKIRTGPU_PROFILE_LAUNCH");
+        if (!value) return false;
+        string text(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return !(text.empty() || text == "0" || text == "false" || text == "off" || text == "no");
+    }
+
+    bool sourceSpectrumPrecomputationEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_PRECOMPUTE_SOURCE_SPECTRA");
         if (!value) return false;
         string text(value);
         std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -62,6 +85,41 @@ namespace
 
     std::atomic<size_t> _profileLaunchCall{0};
     std::mutex _profileLaunchMutex;
+    std::atomic<unsigned long long> _gpuSourceCacheToken{1};
+
+    size_t gpuSourceLaunchMinimumPackets()
+    {
+        const char* text = std::getenv("SKIRTGPU_SOURCE_LAUNCH_MIN_PACKETS");
+        if (!text) return 4194304;
+        char* end = nullptr;
+        unsigned long value = std::strtoul(text, &end, 10);
+        return end != text && value > 0 ? static_cast<size_t>(value) : 4194304;
+    }
+
+    bool gpuSourceLaunchEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_SOURCE_LAUNCH");
+        if (!value) return true;
+        string text(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return !(text.empty() || text == "0" || text == "false" || text == "off" || text == "no");
+    }
+
+    bool useBfloat16SourcePdf(size_t numValues)
+    {
+        constexpr size_t minimumBytes = 1ULL << 30;
+        return numValues > minimumBytes / sizeof(float);
+    }
+
+    unsigned short toBfloat16(float value)
+    {
+        static_assert(sizeof(float) == sizeof(uint32_t), "GPU source PDF packing requires 32-bit floats");
+        static_assert(sizeof(unsigned short) == 2, "GPU source PDF packing requires 16-bit unsigned shorts");
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        bits += 0x7fffU + ((bits >> 16) & 1U);
+        return static_cast<unsigned short>(bits >> 16);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -125,7 +183,7 @@ void ImportedSource::setupSelfAfter()
         log->info("Calculating luminosities for " + std::to_string(M) + " imported entities...");
         log->infoSetElapsed(M);
         bool done = false;
-        if (GpuAcceleration::isProcessEnabled())
+        if (GpuAcceleration::isProcessEnabled() && sourceOptionEnabled("SKIRTGPU_SOURCE_LUMINOSITIES", true))
         {
             auto parameterInfo = _sedFamily->parameterInfo();
             vector<double> flattenedParameters(static_cast<size_t>(M) * parameterInfo.size());
@@ -141,7 +199,31 @@ void ImportedSource::setupSelfAfter()
             if (_sedFamily->cdfBatch(luminosities, _wavelengthRange, flattenedParameters, M)
                 && luminosities.size() == static_cast<size_t>(M))
             {
+                for (double value : luminosities)
+                    if (!std::isfinite(value) || value < 0.)
+                        throw FATALERROR("GPU source luminosity batch returned a nonfinite or negative value");
+                if (sourceOptionEnabled("SKIRTGPU_VALIDATE_SOURCE_LUMINOSITIES", false))
+                {
+                    size_t checks = min(size_t(256), static_cast<size_t>(M));
+                    double maxError = 0.;
+                    Array lambda, pdf, cdf, parameters;
+                    for (size_t i = 0; i != checks; ++i)
+                    {
+                        size_t m = checks > 1 ? i * (M - 1) / (checks - 1) : 0;
+                        _snapshot->parameters(static_cast<int>(m), parameters);
+                        double expected = _sedFamily->cdf(lambda, pdf, cdf, _wavelengthRange, parameters);
+                        double error = expected > 0. ? std::abs(luminosities[m] / expected - 1.)
+                                                     : std::abs(luminosities[m] - expected);
+                        if (!std::isfinite(expected) || !std::isfinite(error) || error > 1e-8)
+                            throw FATALERROR("GPU source luminosity validation failed for entity "
+                                             + std::to_string(m));
+                        maxError = max(maxError, error);
+                    }
+                    log->info("GPU source luminosity validation: CPU-checked entities=" + std::to_string(checks)
+                              + ", max relative error=" + StringUtils::toString(maxError));
+                }
                 for (int m = 0; m != M; ++m) _Lv[m] = luminosities[m];
+                log->info("Calculated source luminosities on GPU for " + std::to_string(M) + " imported entities");
                 done = true;
             }
         }
@@ -289,6 +371,7 @@ double ImportedSource::meanSpecificLuminosity(const Band* band, int m) const
 
 void ImportedSource::prepareForLaunch(double sourceBias, size_t firstIndex, size_t numIndices)
 {
+    _hasGpuSourceLaunchData = false;
     _hasLaunchSpectra = false;
     _launchSpectraFirstIndex = 0;
     _launchWavelengthv.clear();
@@ -317,14 +400,168 @@ void ImportedSource::prepareForLaunch(double sourceBias, size_t firstIndex, size
     }
     _Iv[M] = firstIndex + numIndices;
 
-    prepareGpuLaunchSpectra(firstIndex, numIndices);
+    if (!prepareGpuSourceLaunchData(firstIndex, numIndices)) prepareGpuLaunchSpectra(firstIndex, numIndices);
+}
+
+////////////////////////////////////////////////////////////////////
+
+bool ImportedSource::prepareGpuSourceLaunchData(size_t firstIndex, size_t numIndices)
+{
+    (void)firstIndex;
+    if (!GpuAcceleration::isProcessEnabled() || !gpuSourceLaunchEnabled()
+        || numIndices < gpuSourceLaunchMinimumPackets() || ProcessManager::size() != 1 || _oligochromatic
+        || _importVelocity)
+        return false;
+
+    auto particleSnapshot = dynamic_cast<const ParticleSnapshot*>(_snapshot);
+    auto logBias = _xi ? dynamic_cast<const LogWavelengthDistribution*>(_biasDistribution) : nullptr;
+    if (!particleSnapshot || (_xi && !logBias)) return false;
+
+    int numEntities = _snapshot->numEntities();
+    if (numEntities <= 0) return false;
+
+    if (!_gpuSourceSpectraReady)
+    {
+        vector<double> geometry;
+        if (!particleSnapshot->getGpuSourceLaunchGeometry(geometry)) return false;
+
+        auto log = find<Log>();
+        log->info("Preparing reusable GPU source spectra for " + std::to_string(numEntities)
+                  + " imported particles...");
+        Array firstLambda, firstPdf, firstCdf, params;
+        _snapshot->parameters(0, params);
+        _sedFamily->cdf(firstLambda, firstPdf, firstCdf, _wavelengthRange, params);
+        size_t numWavelengths = firstLambda.size();
+        if (numWavelengths < 2 || firstPdf.size() != numWavelengths || firstCdf.size() != numWavelengths)
+            return false;
+
+        _gpuSourceLaunchData.wavelengthv.resize(numWavelengths);
+        for (size_t ell = 0; ell != numWavelengths; ++ell)
+            _gpuSourceLaunchData.wavelengthv[ell] = firstLambda[ell];
+        bool tableReady = false;
+        if (sourceOptionEnabled("SKIRTGPU_DEVICE_SOURCE_SPECTRA", true))
+        {
+            size_t stride = _sedFamily->parameterInfo().size();
+            vector<double> flattened(static_cast<size_t>(numEntities) * stride);
+            for (int entity = 0; entity < numEntities; ++entity)
+            {
+                _snapshot->parameters(entity, params);
+                for (size_t k = 0; k < stride; ++k) flattened[static_cast<size_t>(entity) * stride + k] = params[k];
+            }
+            tableReady = _sedFamily->gpuSpectrumTable(_gpuSourceLaunchData.spectrumTable, flattened, numEntities);
+        }
+        _gpuSourceLaunchData.particleCenterSizev = std::move(geometry);
+        if (tableReady)
+        {
+            _gpuSourceLaunchData.tablePdfBfloat16 =
+                useBfloat16SourcePdf(static_cast<size_t>(numEntities) * numWavelengths);
+            if (sourceOptionEnabled("SKIRTGPU_VALIDATE_SOURCE_SPECTRA", false))
+            {
+                size_t samples = min(static_cast<size_t>(numEntities), size_t(32));
+                for (size_t sample = 0; sample < samples; ++sample)
+                {
+                    int entity = samples == 1 ? 0 : static_cast<int>(sample * (numEntities - 1) / (samples - 1));
+                    _snapshot->parameters(entity, params);
+                    Array lambda, pdf, cdf;
+                    _sedFamily->cdf(lambda, pdf, cdf, _wavelengthRange, params);
+                    if (lambda.size() != numWavelengths || pdf.size() != numWavelengths
+                        || cdf.size() != numWavelengths)
+                        throw FATALERROR("Inconsistent source wavelength grids for GPU spectrum validation");
+                    _gpuSourceLaunchData.validationEntityv.push_back(entity);
+                    for (size_t ell = 0; ell < numWavelengths; ++ell)
+                    {
+                        _gpuSourceLaunchData.validationPdfv.push_back(static_cast<float>(pdf[ell]));
+                        _gpuSourceLaunchData.validationCdfv.push_back(static_cast<float>(cdf[ell]));
+                    }
+                }
+            }
+            log->info("Source spectra will be constructed directly in each GPU cache");
+        }
+        else
+        {
+            size_t numValues = static_cast<size_t>(numEntities) * numWavelengths;
+            bool packedPdf = useBfloat16SourcePdf(numValues);
+            if (packedPdf)
+                _gpuSourceLaunchData.pdfBfloat16v.resize(numValues);
+            else
+                _gpuSourceLaunchData.pdfv.resize(numValues);
+            _gpuSourceLaunchData.cdfv.resize(numValues);
+
+            std::atomic<bool> valid{true};
+            find<ParallelFactory>()->parallelRootOnly()->call(
+                static_cast<size_t>(numEntities),
+                [this, numWavelengths, packedPdf, &valid](size_t firstEntity, size_t count) {
+                    Array lambdav, pv, Pv, entityParams;
+                    for (size_t m = firstEntity; m != firstEntity + count; ++m)
+                    {
+                        _snapshot->parameters(static_cast<int>(m), entityParams);
+                        _sedFamily->cdf(lambdav, pv, Pv, _wavelengthRange, entityParams);
+                        if (lambdav.size() != numWavelengths || pv.size() != numWavelengths
+                            || Pv.size() != numWavelengths)
+                        {
+                            valid.store(false, std::memory_order_relaxed);
+                            continue;
+                        }
+                        size_t offset = m * numWavelengths;
+                        for (size_t ell = 0; ell != numWavelengths; ++ell)
+                        {
+                            if (packedPdf)
+                                _gpuSourceLaunchData.pdfBfloat16v[offset + ell] = toBfloat16(static_cast<float>(pv[ell]));
+                            else
+                                _gpuSourceLaunchData.pdfv[offset + ell] = static_cast<float>(pv[ell]);
+                            _gpuSourceLaunchData.cdfv[offset + ell] = static_cast<float>(Pv[ell]);
+                        }
+                    }
+                });
+            if (!valid.load(std::memory_order_relaxed))
+            {
+                _gpuSourceLaunchData = GpuSourceLaunchData();
+                return false;
+            }
+
+            if (packedPdf) log->info("Prepared source PDF directly in bfloat16 storage");
+
+        }
+
+        _gpuSourceLaunchData.cacheToken = _gpuSourceCacheToken.fetch_add(1, std::memory_order_relaxed);
+        _gpuSourceSpectraReady = true;
+        log->info("Prepared GPU source spectra with " + std::to_string(numWavelengths)
+                  + " wavelength points per particle");
+    }
+
+    _gpuSourceLaunchData.historyBeginv.resize(_Iv.size());
+    for (size_t m = 0; m != _Iv.size(); ++m)
+        _gpuSourceLaunchData.historyBeginv[m] = static_cast<unsigned long long>(_Iv[m]);
+    _gpuSourceLaunchData.luminosityWeightv.resize(_Lv.size());
+    for (size_t m = 0; m != _Lv.size(); ++m)
+        _gpuSourceLaunchData.luminosityWeightv[m] = _Wv[m] > 0. ? _Lv[m] / _Wv[m] : 0.;
+    _gpuSourceLaunchData.wavelengthBias = _xi;
+    _gpuSourceLaunchData.randomSeed = static_cast<unsigned long long>(random()->seed());
+    if (logBias)
+    {
+        double biasMin = max(logBias->minWavelength(), _wavelengthRange.min());
+        double biasMax = min(logBias->maxWavelength(), _wavelengthRange.max());
+        if (!(biasMin > 0.) || !(biasMax > biasMin)) return false;
+        _gpuSourceLaunchData.biasLogMin = std::log(biasMin);
+        _gpuSourceLaunchData.biasLogWidth = std::log(biasMax) - std::log(biasMin);
+    }
+    else
+    {
+        _gpuSourceLaunchData.biasLogMin = 0.;
+        _gpuSourceLaunchData.biasLogWidth = 0.;
+    }
+    ++_gpuSourceLaunchData.generation;
+    _hasGpuSourceLaunchData = true;
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////
 
 bool ImportedSource::prepareGpuLaunchSpectra(size_t firstIndex, size_t numIndices)
 {
-    if (!GpuAcceleration::isProcessEnabled() || !numIndices || _oligochromatic) return false;
+    if (!GpuAcceleration::isProcessEnabled() || !sourceSpectrumPrecomputationEnabled() || !numIndices
+        || _oligochromatic)
+        return false;
 
     auto parameterInfo = _sedFamily->parameterInfo();
     if (parameterInfo.empty()) return false;
@@ -456,8 +693,7 @@ namespace
         Vec velocity() const override { return _bfv; }
     };
 
-    // setup a velocity instance (with the redshift interface) for each parallel execution thread; this works even if
-    // there are multiple sources of this type because each thread handles a single photon packet at a time
+    // PhotonPacket captures this value at launch, so reuse is safe for batched as well as scalar emission.
     thread_local EntityVelocity t_velocity;
 }
 
@@ -472,11 +708,44 @@ void ImportedSource::launch(PhotonPacket* pp, size_t historyIndex, double L) con
 
 ////////////////////////////////////////////////////////////////////
 
+bool ImportedSource::launchBatchData(vector<double>& packetData, size_t firstHistoryIndex, size_t numPackets,
+                                     double L) const
+{
+    packetData.clear();
+    return numPackets && _hasGpuSourceLaunchData
+           && GpuAcceleration::launchImportedSourcePackets(_gpuSourceLaunchData, firstHistoryIndex, numPackets, L,
+                                                           packetData)
+           && packetData.size() == 8 * numPackets;
+}
+
+////////////////////////////////////////////////////////////////////
+
+const GpuSourceLaunchData* ImportedSource::gpuSourceLaunchData() const
+{
+    return _hasGpuSourceLaunchData ? &_gpuSourceLaunchData : nullptr;
+}
+
+////////////////////////////////////////////////////////////////////
+
 void ImportedSource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, size_t numPackets, double L) const
 {
     if (!numPackets) return;
 
-    if (!GpuAcceleration::isProcessEnabled() || _importVelocity)
+    vector<double> gpuPacketData;
+    if (launchBatchData(gpuPacketData, firstHistoryIndex, numPackets, L))
+    {
+        for (size_t i = 0; i != numPackets; ++i)
+        {
+            size_t offset = 8 * i;
+            ppv[i].launch(firstHistoryIndex + i, gpuPacketData[offset + 6], gpuPacketData[offset + 7],
+                          Position(gpuPacketData[offset], gpuPacketData[offset + 1], gpuPacketData[offset + 2]),
+                          Direction(gpuPacketData[offset + 3], gpuPacketData[offset + 4],
+                                    gpuPacketData[offset + 5], false));
+        }
+        return;
+    }
+
+    if (!GpuAcceleration::isProcessEnabled())
     {
         size_t endHistoryIndex = firstHistoryIndex + numPackets;
         size_t offset = 0;
@@ -514,6 +783,7 @@ void ImportedSource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, si
     vector<double> lambdav;
     vector<double> luminosityv;
     vector<Position> positionv;
+    vector<Vec> velocityv;
     vector<double> randomCosthetav;
     vector<double> randomPhiv;
     activeOffsetv.reserve(numPackets);
@@ -521,6 +791,7 @@ void ImportedSource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, si
     lambdav.reserve(numPackets);
     luminosityv.reserve(numPackets);
     positionv.reserve(numPackets);
+    if (_importVelocity) velocityv.reserve(numPackets);
     randomCosthetav.reserve(numPackets);
     randomPhiv.reserve(numPackets);
 
@@ -598,6 +869,12 @@ void ImportedSource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, si
             lambdav.push_back(lambda);
             luminosityv.push_back(L * w * ws);
             positionv.push_back(_snapshot->generatePosition(m));
+            if (_importVelocity)
+            {
+                Vec velocity = _snapshot->velocity(m);
+                if (_importVelocityDispersion) velocity += _snapshot->velocityDispersion(m) * random()->maxwell();
+                velocityv.push_back(velocity);
+            }
             if (profileLaunch)
             {
                 auto profileNow = std::chrono::steady_clock::now();
@@ -624,7 +901,9 @@ void ImportedSource::launchBatch(PhotonPacket* ppv, size_t firstHistoryIndex, si
         Direction bfk = useGpuDirections
                             ? Direction(directionv[3 * i], directionv[3 * i + 1], directionv[3 * i + 2], false)
                             : Direction(acos(2. * randomCosthetav[i] - 1.), 2. * M_PI * randomPhiv[i]);
-        ppv[activeOffsetv[i]].launch(activeHistoryIndexv[i], lambdav[i], luminosityv[i], positionv[i], bfk, nullptr);
+        if (_importVelocity) t_velocity.setBulkVelocity(velocityv[i]);
+        ppv[activeOffsetv[i]].launch(activeHistoryIndexv[i], lambdav[i], luminosityv[i], positionv[i], bfk,
+                                   _importVelocity ? &t_velocity : nullptr);
     }
     if (profileLaunch)
     {

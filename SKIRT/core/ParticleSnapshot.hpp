@@ -59,6 +59,11 @@ public:
     //=========== Interrogation ==========
 
 public:
+    /** Stores the center coordinates and smoothing length for every particle in consecutive x, y,
+        z, h quadruples. Returns true only when the snapshot uses the cubic-spline smoothing kernel
+        supported by the GPU source-launch kernel. */
+    bool getGpuSourceLaunchGeometry(vector<double>& centerSizev) const;
+
     /** This function returns the bounding box surrounding all particles lined up with the
         coordinate axes. The function assumes a kernel with finite support to determine the extent
         of each particle. */

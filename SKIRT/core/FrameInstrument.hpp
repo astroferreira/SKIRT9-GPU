@@ -8,6 +8,7 @@
 
 #include "DistantInstrument.hpp"
 #include "Position.hpp"
+struct GpuFrameDetectorInfo;
 
 ////////////////////////////////////////////////////////////////////
 
@@ -77,6 +78,9 @@ public:
     bool detectTotalBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
                           const vector<double>& luminosityv, const vector<double>& tauv);
 
+    /** Fills a descriptor for the fused GPU observer/detector path. */
+    bool getGpuDetectorInfo(GpuFrameDetectorInfo& info);
+
     /** This function returns true if this frame instrument can use the fused GPU
         Henyey-Greenstein scattering detector path. */
     bool supportsHenyeyGreensteinScatteringFrameBandBatch();
@@ -88,9 +92,8 @@ public:
     /** This function detects a batch of direct luminosity contributions for total-only frame
         outputs using a fused GPU observer/detector path. It returns false if the associated flux
         recorder requires the generic scalar detect path. */
-    bool detectObservedFrameBandBatch(const vector<Position>& positionv,
-                                      const vector<double>& wavelengthv,
-                                      const vector<double>& luminosityv);
+    bool detectObservedFrameBandBatch(const vector<Position>& positionv, const vector<double>& wavelengthv,
+                                      const vector<double>& luminosityv, vector<double>* tauOutv = nullptr);
 
     /** This function detects a batch of direct Henyey-Greenstein scattering peel-off
         contributions for total-only frame outputs using a fused GPU observer/detector path. It
