@@ -383,6 +383,357 @@ extern "C" __global__ void source_spectrum_normalize_rows(
         cdfOutput[outputOffset + i] = cdfFloat;
     }
 }
+
+extern "C" __global__ void source_spectrum_luminosity_rows_fused(
+    const double* axisValues, const int* axisOffsets, const int* axisLengths, const int* axisLog,
+    const double* quantity, int numAxes, int quantityLog, int clampFirstAxis, const double* parameters,
+    const double* wavelengths, int numWavelengths, int firstEntity, int numRows, int loglog,
+    const double* scaleValues, double* luminosities, const double* logRatio)
+{
+    int lane = static_cast<int>(threadIdx.x);
+    if (numAxes < 2 || numAxes > 5 || numWavelengths < 2 || blockDim.x != 256) return;
+
+    __shared__ int nonWavelengthRight[4];
+    __shared__ double nonWavelengthFraction[4];
+    __shared__ unsigned long long cornerBases[16];
+    __shared__ double cornerWeights[16];
+    __shared__ double sLog[257];
+    __shared__ double sPdf[257];
+    __shared__ double reduction[8];
+
+    const double* firstAxis = axisValues + axisOffsets[0];
+    int firstLength = axisLengths[0];
+    int firstAxisLog = axisLog[0];
+    int minRight = skirt_upper_bound_double(firstAxis, firstLength, wavelengths[0]);
+    int numCorners = 1 << (numAxes - 1);
+    int numIntervals = numWavelengths - 1;
+
+    for (int row = static_cast<int>(blockIdx.x); row < numRows; row += static_cast<int>(gridDim.x))
+    {
+        int entity = firstEntity + row;
+        if (lane == 0)
+        {
+            for (int k = 1; k != numAxes; ++k)
+            {
+                const double* axis = axisValues + axisOffsets[k];
+                int length = axisLengths[k];
+                double value = parameters[static_cast<unsigned long long>(entity) * (numAxes - 1) + (k - 1)];
+                int right = skirt_lower_bound_double(axis, length, value);
+                if (right == 0)
+                {
+                    right++;
+                    value = axis[0];
+                }
+                else if (right == length)
+                {
+                    right--;
+                    value = axis[right];
+                }
+                double x1 = axis[right - 1];
+                double x2 = axis[right];
+                if (axisLog[k])
+                {
+                    value = log(value);
+                    x1 = log(x1);
+                    x2 = log(x2);
+                }
+                nonWavelengthRight[k - 1] = right;
+                nonWavelengthFraction[k - 1] = (value - x1) / (x2 - x1);
+            }
+        }
+        __syncthreads();
+
+        if (lane < numCorners)
+        {
+            int indices[5] = {0, 0, 0, 0, 0};
+            int term = lane;
+            double weight = 1.0;
+            for (int k = 1; k != numAxes; ++k)
+            {
+                int left = term & 1;
+                indices[k] = nonWavelengthRight[k - 1] - left;
+                double fraction = nonWavelengthFraction[k - 1];
+                weight *= left ? (1.0 - fraction) : fraction;
+                term >>= 1;
+            }
+            cornerBases[lane] = skirt_table_flattened_index(indices, axisLengths, numAxes);
+            cornerWeights[lane] = weight;
+        }
+        __syncthreads();
+
+        double norm = 0.0;
+        for (int tile = 0; tile < numIntervals; tile += 256)
+        {
+            if (tile == 0 && lane == 0)
+            {
+                double y0 = skirt_source_spectrum_value(
+                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
+                    cornerBases, cornerWeights, numCorners, wavelengths[0], 0, minRight, numIntervals);
+                sLog[0] = y0;
+                sPdf[0] = quantityLog ? exp(y0) : y0;
+            }
+            int pt = tile + 1 + lane;
+            if (pt < numWavelengths)
+            {
+                double y = skirt_source_spectrum_value(
+                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
+                    cornerBases, cornerWeights, numCorners, wavelengths[pt], pt, minRight, numIntervals);
+                sLog[lane + 1] = y;
+                sPdf[lane + 1] = quantityLog ? exp(y) : y;
+            }
+            __syncthreads();
+
+            int interval = tile + lane;
+            if (interval < numIntervals)
+            {
+                double leftPdf = sPdf[lane];
+                double rightPdf = sPdf[lane + 1];
+                double leftX = wavelengths[interval];
+                double rightX = wavelengths[interval + 1];
+                if (!loglog)
+                    norm += 0.5 * (leftPdf + rightPdf) * (rightX - leftX);
+                else if (leftPdf > 0.0 && rightPdf > 0.0)
+                {
+                    if (quantityLog && logRatio)
+                        norm += skirt_powerlaw_area_logs(leftPdf, rightPdf, leftX, rightX,
+                                                         logRatio[interval], sLog[lane + 1] - sLog[lane]);
+                    else
+                        norm += skirt_powerlaw_area(leftPdf, rightPdf, leftX, rightX);
+                }
+            }
+            double nextLog0 = sLog[256];
+            double nextPdf0 = sPdf[256];
+            __syncthreads();
+            if (lane == 0)
+            {
+                sLog[0] = nextLog0;
+                sPdf[0] = nextPdf0;
+            }
+        }
+
+        for (int offset = 16; offset > 0; offset >>= 1)
+            norm += __shfl_down_sync(0xffffffffu, norm, offset);
+        if ((lane & 31) == 0)
+            reduction[lane >> 5] = norm;
+        __syncthreads();
+        if (lane == 0)
+        {
+            double total = 0.0;
+            #pragma unroll
+            for (int w = 0; w < 8; ++w) total += reduction[w];
+            luminosities[entity] = total * scaleValues[entity];
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void source_spectrum_build_rows_fused(
+    const double* axisValues, const int* axisOffsets, const int* axisLengths, const int* axisLog,
+    const double* quantity, int numAxes, int quantityLog, int clampFirstAxis, const double* parameters,
+    const double* wavelengths, int numWavelengths, int firstEntity, int numRows, int loglog,
+    double* pdfScratch, double* cdfScratch, float* pdfOutput, unsigned short* pdfBfloat16Output,
+    float* cdfOutput, int* status, const unsigned long long* historyBeginv, const double* logRatio)
+{
+    int lane = static_cast<int>(threadIdx.x);
+    if (numAxes < 2 || numAxes > 5 || numWavelengths < 2 || blockDim.x != 256
+        || (!pdfOutput && !pdfBfloat16Output) || !cdfOutput)
+    {
+        if (lane == 0 && status) atomicExch(status, 0);
+        return;
+    }
+
+    __shared__ int nonWavelengthRight[4];
+    __shared__ double nonWavelengthFraction[4];
+    __shared__ unsigned long long cornerBases[16];
+    __shared__ double cornerWeights[16];
+    __shared__ double sLog[257];
+    __shared__ double sPdf[257];
+    __shared__ double warpSum[8];
+    __shared__ double carry;
+
+    const double* firstAxis = axisValues + axisOffsets[0];
+    int firstLength = axisLengths[0];
+    int firstAxisLog = axisLog[0];
+    int minRight = skirt_upper_bound_double(firstAxis, firstLength, wavelengths[0]);
+    int numCorners = 1 << (numAxes - 1);
+    int numIntervals = numWavelengths - 1;
+    unsigned long long scratchOffset = static_cast<unsigned long long>(blockIdx.x) * numWavelengths;
+
+    for (int row = static_cast<int>(blockIdx.x); row < numRows; row += static_cast<int>(gridDim.x))
+    {
+        int entityIndex = firstEntity + row;
+        unsigned long long entity = static_cast<unsigned long long>(firstEntity) + static_cast<unsigned int>(row);
+        unsigned long long outputOffset = entity * static_cast<unsigned int>(numWavelengths);
+        if (historyBeginv && historyBeginv[entityIndex] == historyBeginv[entityIndex + 1])
+        {
+            for (int i = lane; i < numWavelengths; i += 256)
+            {
+                if (pdfBfloat16Output)
+                    pdfBfloat16Output[outputOffset + i] = 0;
+                else
+                    pdfOutput[outputOffset + i] = 0.0f;
+                cdfOutput[outputOffset + i] = 0.0f;
+            }
+            continue;
+        }
+
+        if (lane == 0)
+        {
+            for (int k = 1; k != numAxes; ++k)
+            {
+                const double* axis = axisValues + axisOffsets[k];
+                int length = axisLengths[k];
+                double value = parameters[static_cast<unsigned long long>(entityIndex) * (numAxes - 1) + (k - 1)];
+                int right = skirt_lower_bound_double(axis, length, value);
+                if (right == 0)
+                {
+                    right++;
+                    value = axis[0];
+                }
+                else if (right == length)
+                {
+                    right--;
+                    value = axis[right];
+                }
+                double x1 = axis[right - 1];
+                double x2 = axis[right];
+                if (axisLog[k])
+                {
+                    value = log(value);
+                    x1 = log(x1);
+                    x2 = log(x2);
+                }
+                nonWavelengthRight[k - 1] = right;
+                nonWavelengthFraction[k - 1] = (value - x1) / (x2 - x1);
+            }
+            carry = 0.0;
+            cdfScratch[scratchOffset] = 0.0;
+        }
+        __syncthreads();
+
+        if (lane < numCorners)
+        {
+            int indices[5] = {0, 0, 0, 0, 0};
+            int term = lane;
+            double weight = 1.0;
+            for (int k = 1; k != numAxes; ++k)
+            {
+                int left = term & 1;
+                indices[k] = nonWavelengthRight[k - 1] - left;
+                double fraction = nonWavelengthFraction[k - 1];
+                weight *= left ? (1.0 - fraction) : fraction;
+                term >>= 1;
+            }
+            cornerBases[lane] = skirt_table_flattened_index(indices, axisLengths, numAxes);
+            cornerWeights[lane] = weight;
+        }
+        __syncthreads();
+
+        for (int tile = 0; tile < numIntervals; tile += 256)
+        {
+            int tileCount = numIntervals - tile;
+            if (tileCount > 256) tileCount = 256;
+
+            if (tile == 0 && lane == 0)
+            {
+                double y0 = skirt_source_spectrum_value(
+                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
+                    cornerBases, cornerWeights, numCorners, wavelengths[0], 0, minRight, numIntervals);
+                double p0 = quantityLog ? exp(y0) : y0;
+                sLog[0] = y0;
+                sPdf[0] = p0;
+                pdfScratch[scratchOffset] = p0;
+            }
+            int pt = tile + 1 + lane;
+            if (pt < numWavelengths)
+            {
+                double y = skirt_source_spectrum_value(
+                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
+                    cornerBases, cornerWeights, numCorners, wavelengths[pt], pt, minRight, numIntervals);
+                double p = quantityLog ? exp(y) : y;
+                sLog[lane + 1] = y;
+                sPdf[lane + 1] = p;
+                pdfScratch[scratchOffset + pt] = p;
+            }
+            __syncthreads();
+
+            int interval = tile + lane;
+            double area = 0.0;
+            if (interval < numIntervals)
+            {
+                double leftPdf = sPdf[lane];
+                double rightPdf = sPdf[lane + 1];
+                double leftX = wavelengths[interval];
+                double rightX = wavelengths[interval + 1];
+                if (!loglog)
+                    area = 0.5 * (leftPdf + rightPdf) * (rightX - leftX);
+                else if (leftPdf > 0.0 && rightPdf > 0.0)
+                {
+                    if (quantityLog && logRatio)
+                        area = skirt_powerlaw_area_logs(leftPdf, rightPdf, leftX, rightX,
+                                                        logRatio[interval], sLog[lane + 1] - sLog[lane]);
+                    else
+                        area = skirt_powerlaw_area(leftPdf, rightPdf, leftX, rightX);
+                }
+                if (!isfinite(area) && status) atomicExch(status, 0);
+            }
+            double nextLog0 = sLog[256];
+            double nextPdf0 = sPdf[256];
+            double tileCarry = carry;
+            double prefix = area;
+            int warpLane = lane & 31;
+            int warpId = lane >> 5;
+            #pragma unroll
+            for (int offset = 1; offset < 32; offset <<= 1)
+            {
+                double other = __shfl_up_sync(0xffffffffu, prefix, offset);
+                if (warpLane >= offset) prefix += other;
+            }
+            if (warpLane == 31) warpSum[warpId] = prefix;
+            __syncthreads();
+
+            #pragma unroll
+            for (int w = 0; w < 8; ++w)
+            {
+                if (w < warpId) tileCarry += warpSum[w];
+            }
+            double cdfVal = tileCarry + prefix;
+            if (interval < numIntervals) cdfScratch[scratchOffset + interval + 1] = cdfVal;
+            if (lane == 0)
+            {
+                sLog[0] = nextLog0;
+                sPdf[0] = nextPdf0;
+            }
+            if (lane == tileCount - 1) carry = cdfVal;
+            __syncthreads();
+        }
+
+        double norm = carry;
+        if (!isfinite(norm) && status) atomicExch(status, 0);
+        bool normalize = norm > 0.0;
+        double invNorm = normalize ? (1.0 / norm) : 1.0;
+        for (int i = lane; i < numWavelengths; i += 256)
+        {
+            double pdf = pdfScratch[scratchOffset + i] * invNorm;
+            double cdf = cdfScratch[scratchOffset + i] * invNorm;
+            if ((!isfinite(pdf) || !isfinite(cdf)) && status) atomicExch(status, 0);
+
+            float pdfFloat = static_cast<float>(pdf);
+            float cdfFloat = static_cast<float>(cdf);
+            if ((!isfinite(pdfFloat) || !isfinite(cdfFloat)) && status) atomicExch(status, 0);
+            if (pdfBfloat16Output)
+            {
+                unsigned short packed = skirt_source_bfloat16_rne(pdfFloat);
+                if ((packed & 0x7f80U) == 0x7f80U && status) atomicExch(status, 0);
+                pdfBfloat16Output[outputOffset + i] = packed;
+            }
+            else
+                pdfOutput[outputOffset + i] = pdfFloat;
+            cdfOutput[outputOffset + i] = cdfFloat;
+        }
+        __syncthreads();
+    }
+}
 )cuda";
 }
 

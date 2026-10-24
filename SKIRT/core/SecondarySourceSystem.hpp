@@ -225,7 +225,7 @@ public:
     /** This function exposes one prepared source covering the requested history range for direct
         resident GPU launch. */
     bool gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData, double& luminosityPerPacket,
-                             size_t firstHistoryIndex, size_t numPackets) const;
+                             size_t firstHistoryIndex, size_t numPackets, size_t* spanPackets = nullptr) const;
 
     //======================== Data Members ========================
 

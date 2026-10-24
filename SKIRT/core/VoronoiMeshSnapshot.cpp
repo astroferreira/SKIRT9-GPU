@@ -562,36 +562,49 @@ void VoronoiMeshSnapshot::buildMesh(bool relax)
             Vec r = _cells[m]->position();
             vcon.put(m, r.x(), r.y(), r.z());
         }
+        vector<int> relaxIjk;
+        vector<int> relaxQ;
+        relaxIjk.reserve(numCells);
+        relaxQ.reserve(numCells);
+        for (int ijk = 0; ijk < _nb3; ++ijk)
+        {
+            int count = vcon.co[ijk];
+            for (int q = 0; q < count; ++q)
+            {
+                relaxIjk.push_back(ijk);
+                relaxQ.push_back(q);
+            }
+        }
 
         // compute the cell in the Voronoi tesselation corresponding to each site
         // and store the cell's centroid (relative to the site position) as the relaxation offset
         log()->info("Relaxing Voronoi tessellation with " + std::to_string(numCells) + " cells");
         log()->infoSetElapsed(numCells);
         auto parallel = log()->find<ParallelFactory>()->parallelDistributed();
-        parallel->call(numCells, [this, &vcon, &offsets](size_t firstIndex, size_t numIndices) {
+        parallel->call(numCells, [this, &vcon, &offsets, &relaxIjk, &relaxQ](size_t firstIndex, size_t numIndices) {
             // allocate a separate cell calculator for each thread to avoid conflicts
             voro::voro_compute<voro::container> vcompute(vcon, _nb, _nb, _nb);
             // allocate space for the resulting cell info
             voro::voronoicell vcell;
 
-            // loop over all cells and work on the ones that have a particle index in our dedicated range
-            // (we cannot access cells in the container based on cell index m without building an extra data structure)
             int numDone = 0;
-            voro::c_loop_all vloop(vcon);
-            if (vloop.start()) do
-                {
-                    size_t m = vloop.pid();
-                    if (m >= firstIndex && m < firstIndex + numIndices)
-                    {
-                        // compute the cell and store its centroid as relaxation offset
-                        bool ok = vcompute.compute_cell(vcell, vloop.ijk, vloop.q, vloop.i, vloop.j, vloop.k);
-                        if (ok) vcell.centroid(offsets(m, 0), offsets(m, 1), offsets(m, 2));
+            size_t endIndex = std::min(firstIndex + numIndices, relaxIjk.size());
+            for (size_t idx = firstIndex; idx < endIndex; ++idx)
+            {
+                int ijk = relaxIjk[idx];
+                int q = relaxQ[idx];
+                int i = ijk % _nb;
+                int j = (ijk / _nb) % _nb;
+                int k = ijk / _nb2;
+                // compute the cell and store its centroid as relaxation offset
+                bool ok = vcompute.compute_cell(vcell, ijk, q, i, j, k);
+                int m = vcon.id[ijk][q];
+                if (ok) vcell.centroid(offsets(m, 0), offsets(m, 1), offsets(m, 2));
 
-                        // log message if the minimum time has elapsed
-                        numDone = (numDone + 1) % logProgressChunkSize;
-                        if (numDone == 0) log()->infoIfElapsed("Computed Voronoi cells: ", logProgressChunkSize);
-                    }
-                } while (vloop.inc());
+                // log message if the minimum time has elapsed
+                numDone = (numDone + 1) % logProgressChunkSize;
+                if (numDone == 0) log()->infoIfElapsed("Computed Voronoi cells: ", logProgressChunkSize);
+            }
             if (numDone > 0) log()->infoIfElapsed("Computed Voronoi cells: ", numDone);
         });
 
@@ -614,6 +627,19 @@ void VoronoiMeshSnapshot::buildMesh(bool relax)
             Vec r = _cells[m]->position();
             vcon.put(m, r.x(), r.y(), r.z());
         }
+        vector<int> cellIjk;
+        vector<int> cellQ;
+        cellIjk.reserve(numCells);
+        cellQ.reserve(numCells);
+        for (int ijk = 0; ijk < _nb3; ++ijk)
+        {
+            int count = vcon.co[ijk];
+            for (int q = 0; q < count; ++q)
+            {
+                cellIjk.push_back(ijk);
+                cellQ.push_back(q);
+            }
+        }
 
         // for each site:
         //   - compute the corresponding cell in the Voronoi tesselation
@@ -621,30 +647,30 @@ void VoronoiMeshSnapshot::buildMesh(bool relax)
         log()->info("Constructing Voronoi tessellation with " + std::to_string(numCells) + " cells");
         log()->infoSetElapsed(numCells);
         auto parallel = log()->find<ParallelFactory>()->parallelDistributed();
-        parallel->call(numCells, [this, &vcon](size_t firstIndex, size_t numIndices) {
+        parallel->call(numCells, [this, &vcon, &cellIjk, &cellQ](size_t firstIndex, size_t numIndices) {
             // allocate a separate cell calculator for each thread to avoid conflicts
             voro::voro_compute<voro::container> vcompute(vcon, _nb, _nb, _nb);
             // allocate space for the resulting cell info
             voro::voronoicell_neighbor vcell;
 
-            // loop over all cells and work on the ones that have a particle index in our dedicated range
-            // (we cannot access cells in the container based on cell index m without building an extra data structure)
             int numDone = 0;
-            voro::c_loop_all vloop(vcon);
-            if (vloop.start()) do
-                {
-                    size_t m = vloop.pid();
-                    if (m >= firstIndex && m < firstIndex + numIndices)
-                    {
-                        // compute the cell and copy all relevant information to the cell object that will stay around
-                        bool ok = vcompute.compute_cell(vcell, vloop.ijk, vloop.q, vloop.i, vloop.j, vloop.k);
-                        if (ok) _cells[m]->init(vcell);
+            size_t endIndex = std::min(firstIndex + numIndices, cellIjk.size());
+            for (size_t idx = firstIndex; idx < endIndex; ++idx)
+            {
+                int ijk = cellIjk[idx];
+                int q = cellQ[idx];
+                int i = ijk % _nb;
+                int j = (ijk / _nb) % _nb;
+                int k = ijk / _nb2;
+                // compute the cell and copy all relevant information to the cell object that will stay around
+                bool ok = vcompute.compute_cell(vcell, ijk, q, i, j, k);
+                int m = vcon.id[ijk][q];
+                if (ok) _cells[m]->init(vcell);
 
-                        // log message if the minimum time has elapsed
-                        numDone = (numDone + 1) % logProgressChunkSize;
-                        if (numDone == 0) log()->infoIfElapsed("Computed Voronoi cells: ", logProgressChunkSize);
-                    }
-                } while (vloop.inc());
+                // log message if the minimum time has elapsed
+                numDone = (numDone + 1) % logProgressChunkSize;
+                if (numDone == 0) log()->infoIfElapsed("Computed Voronoi cells: ", logProgressChunkSize);
+            }
             if (numDone > 0) log()->infoIfElapsed("Computed Voronoi cells: ", numDone);
         });
 
@@ -665,23 +691,33 @@ void VoronoiMeshSnapshot::buildMesh(bool relax)
 
         // discover invalid cells with zero volume and/or with neighbors that are not mutual
         log()->info("Verifying Voronoi tessellation");
-        std::set<int> invalid;
-        for (int m = 0; m < numCells; m++)
-        {
-            if (!_cells[m]->volume()) invalid.insert(m);
-            for (int m1 : _cells[m]->neighbors())
+        vector<unsigned char> invalidFlag(numCells, 0);
+        auto verifyChunk = [this, &invalidFlag](size_t firstIndex, size_t numIndices) {
+            size_t endIndex = firstIndex + numIndices;
+            for (size_t m = firstIndex; m < endIndex; ++m)
             {
-                if (m1 >= 0)
+                if (!_cells[m]->volume()) invalidFlag[m] = 1;
+                for (int m1 : _cells[m]->neighbors())
                 {
-                    const vector<int>& neighbors1 = _cells[m1]->neighbors();
-                    if (std::find(neighbors1.begin(), neighbors1.end(), m) == neighbors1.end())
+                    if (m1 >= 0)
                     {
-                        invalid.insert(m);
-                        invalid.insert(m1);
+                        const vector<int>& neighbors1 = _cells[m1]->neighbors();
+                        if (std::find(neighbors1.begin(), neighbors1.end(), static_cast<int>(m)) == neighbors1.end())
+                        {
+                            invalidFlag[m] = 1;
+                            invalidFlag[m1] = 1;
+                        }
                     }
                 }
             }
-        }
+        };
+        if (!ProcessManager::isMultiProc())
+            log()->find<ParallelFactory>()->parallelDistributed()->call(numCells, verifyChunk);
+        else
+            verifyChunk(0, static_cast<size_t>(numCells));
+        std::set<int> invalid;
+        for (int m = 0; m < numCells; m++)
+            if (invalidFlag[m]) invalid.insert(m);
 
         // break from loop if no invalid cells were found
         if (invalid.empty()) break;
@@ -790,10 +826,11 @@ void VoronoiMeshSnapshot::buildSearchPerBlock()
 
     // -------------  block lists  -------------
 
-    // initialize a vector of nb x nb x nb lists, each containing the cells overlapping a certain block in the domain
-    _blocklists.resize(_nb3);
+    _traversalBlockGridN = _nb;
+    _traversalBlockBegin.resize(_nb3);
+    _traversalBlockCount.assign(_nb3, 0);
 
-    // add the cell object to the lists for all blocks it may overlap
+    // count the cells overlapping each block in the domain
     int i1, j1, k1, i2, j2, k2;
     for (int m = 0; m != numCells; ++m)
     {
@@ -801,33 +838,33 @@ void VoronoiMeshSnapshot::buildSearchPerBlock()
         _extent.cellIndices(i2, j2, k2, _cells[m]->rmax() + Vec(_eps, _eps, _eps), _nb, _nb, _nb);
         for (int i = i1; i <= i2; i++)
             for (int j = j1; j <= j2; j++)
-                for (int k = k1; k <= k2; k++) _blocklists[i * _nb2 + j * _nb + k].push_back(m);
+                for (int k = k1; k <= k2; k++) _traversalBlockCount[i * _nb2 + j * _nb + k]++;
     }
 
-    // compile block list statistics
+    // compile block list statistics and offsets
     int minRefsPerBlock = INT_MAX;
     int maxRefsPerBlock = 0;
     int64_t totalBlockRefs = 0;
     for (int b = 0; b < _nb3; b++)
     {
-        int refs = _blocklists[b].size();
+        int refs = _traversalBlockCount[b];
+        _traversalBlockBegin[b] = static_cast<int>(totalBlockRefs);
         totalBlockRefs += refs;
         minRefsPerBlock = min(minRefsPerBlock, refs);
         maxRefsPerBlock = max(maxRefsPerBlock, refs);
     }
     double avgRefsPerBlock = double(totalBlockRefs) / _nb3;
 
-    _traversalBlockGridN = _nb;
-    _traversalBlockBegin.resize(_nb3);
-    _traversalBlockCount.resize(_nb3);
-    _traversalBlockIndex.clear();
-    _traversalBlockIndex.reserve(static_cast<size_t>(totalBlockRefs));
-    for (int b = 0; b < _nb3; b++)
+    _traversalBlockIndex.resize(static_cast<size_t>(totalBlockRefs));
+    vector<int> blockCursor = _traversalBlockBegin;
+    for (int m = 0; m != numCells; ++m)
     {
-        const vector<int>& ids = _blocklists[b];
-        _traversalBlockBegin[b] = static_cast<int>(_traversalBlockIndex.size());
-        _traversalBlockCount[b] = static_cast<int>(ids.size());
-        _traversalBlockIndex.insert(_traversalBlockIndex.end(), ids.begin(), ids.end());
+        _extent.cellIndices(i1, j1, k1, _cells[m]->rmin() - Vec(_eps, _eps, _eps), _nb, _nb, _nb);
+        _extent.cellIndices(i2, j2, k2, _cells[m]->rmax() + Vec(_eps, _eps, _eps), _nb, _nb, _nb);
+        for (int i = i1; i <= i2; i++)
+            for (int j = j1; j <= j2; j++)
+                for (int k = k1; k <= k2; k++)
+                    _traversalBlockIndex[blockCursor[i * _nb2 + j * _nb + k]++] = m;
     }
 
     // log block list statistics
@@ -840,12 +877,23 @@ void VoronoiMeshSnapshot::buildSearchPerBlock()
 
     // for each block that contains more than a predefined number of cells,
     // construct a search tree on the site locations of the cells
-    _blocktrees.resize(_nb3);
-    for (int b = 0; b < _nb3; b++)
-    {
-        vector<int>& ids = _blocklists[b];
-        if (ids.size() > 9) _blocktrees[b] = buildTree(ids.begin(), ids.end(), 0);
-    }
+    _blocklists.resize(_nb3);
+    _blocktrees.assign(_nb3, nullptr);
+    auto searchChunk = [this](size_t firstIndex, size_t numIndices) {
+        size_t endIndex = firstIndex + numIndices;
+        for (size_t b = firstIndex; b < endIndex; ++b)
+        {
+            int begin = _traversalBlockBegin[b];
+            int count = _traversalBlockCount[b];
+            vector<int>& ids = _blocklists[b];
+            ids.assign(_traversalBlockIndex.begin() + begin, _traversalBlockIndex.begin() + begin + count);
+            if (count > 9) _blocktrees[b] = buildTree(ids.begin(), ids.end(), 0);
+        }
+    };
+    if (!ProcessManager::isMultiProc())
+        log()->find<ParallelFactory>()->parallelDistributed()->call(_nb3, searchChunk);
+    else
+        searchChunk(0, static_cast<size_t>(_nb3));
 
     // compile and log search tree statistics
     int numTrees = 0;

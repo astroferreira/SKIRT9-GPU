@@ -82,21 +82,52 @@ namespace
         if (std::getenv("SKIRTGPU_LIFECYCLE_THREADS"))
             return environmentThreadValue("SKIRTGPU_LIFECYCLE_THREADS", 0);
 
+        constexpr int defaultDirectPrimaryGpuFeederThreads = 1;
         constexpr int defaultPrimaryGpuFeederThreads = 6;
         constexpr int defaultDirectSecondaryGpuFeederThreads = 4;
         constexpr int defaultPackedSecondaryGpuFeederThreads = 12;
         constexpr size_t minimumPacketsForGpuFeederLimit = 4194304;
         if (numPackets < minimumPacketsForGpuFeederLimit) return 0;
-        if (!secondary) return defaultPrimaryGpuFeederThreads;
+        if (!secondary)
+            return directDeviceSource ? defaultDirectPrimaryGpuFeederThreads : defaultPrimaryGpuFeederThreads;
         return directDeviceSource ? defaultDirectSecondaryGpuFeederThreads : defaultPackedSecondaryGpuFeederThreads;
+    }
+
+    bool hasDirectPrimaryGpuSource(const SourceSystem* sourceSystem, size_t numPackets)
+    {
+        if (!sourceSystem || !numPackets || !environmentFlag("SKIRTGPU_DEVICE_SOURCE_LIFECYCLE", true)) return false;
+        size_t offset = 0;
+        while (offset < numPackets)
+        {
+            const GpuSourceLaunchData* sourceData = nullptr;
+            double luminosityPerPacket = 0.;
+            size_t spanPackets = 0;
+            if (!sourceSystem->gpuSourceLaunchData(sourceData, luminosityPerPacket, offset, numPackets - offset,
+                                                   &spanPackets)
+                || !spanPackets)
+                return false;
+            offset += spanPackets;
+        }
+        return true;
     }
 
     bool hasDirectSecondaryGpuSource(const SecondarySourceSystem* sourceSystem, size_t numPackets)
     {
-        if (!sourceSystem || !environmentFlag("SKIRTGPU_DEVICE_DUST_SOURCE_LIFECYCLE", true)) return false;
-        const GpuSourceLaunchData* sourceData = nullptr;
-        double luminosityPerPacket = 0.;
-        return sourceSystem->gpuSourceLaunchData(sourceData, luminosityPerPacket, 0, numPackets);
+        if (!sourceSystem || !numPackets || !environmentFlag("SKIRTGPU_DEVICE_DUST_SOURCE_LIFECYCLE", true))
+            return false;
+        size_t offset = 0;
+        while (offset < numPackets)
+        {
+            const GpuSourceLaunchData* sourceData = nullptr;
+            double luminosityPerPacket = 0.;
+            size_t spanPackets = 0;
+            if (!sourceSystem->gpuSourceLaunchData(sourceData, luminosityPerPacket, offset, numPackets - offset,
+                                                   &spanPackets)
+                || !spanPackets)
+                return false;
+            offset += spanPackets;
+        }
+        return true;
     }
 
     size_t matchingDistantObserverIndex(const vector<Instrument*>& observers, const Instrument* instrument)
@@ -323,7 +354,9 @@ void MonteCarloSimulation::runPrimaryEmission()
     {
         initProgress(segment, Npp);
         sourceSystem()->prepareForLaunch(Npp);
-        auto parallel = find<ParallelFactory>()->parallelDistributed(lifeCycleThreadLimit(_config, Npp, false));
+        bool directDeviceSource = hasDirectPrimaryGpuSource(sourceSystem(), Npp);
+        auto parallel = find<ParallelFactory>()->parallelDistributed(
+            lifeCycleThreadLimit(_config, Npp, false, directDeviceSource));
         parallel->call(
             Npp, [this](size_t i, size_t n) { performLifeCycle(i, n, true, true, _config->hasRadiationField()); });
         instrumentSystem()->flush();
@@ -1942,14 +1975,35 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
                                              : environmentFlag("SKIRTGPU_DEVICE_DUST_SOURCE_LIFECYCLE", true);
         if (directSourceRequested)
         {
-            const GpuSourceLaunchData* gpuSource = nullptr;
-            double luminosityPerPacket = 0.;
-            bool sourceReady = primary
-                                   ? sourceSystem()->gpuSourceLaunchData(gpuSource, luminosityPerPacket,
-                                                                         firstIndex, numIndices)
-                                   : _secondarySourceSystem->gpuSourceLaunchData(
-                                         gpuSource, luminosityPerPacket, firstIndex, numIndices);
-            if (sourceReady)
+            struct DirectSubSpan
+            {
+                const GpuSourceLaunchData* gpuSource{nullptr};
+                double luminosityPerPacket{0.};
+                size_t first{0};
+                size_t count{0};
+            };
+            vector<DirectSubSpan> spans;
+            size_t offset = 0;
+            bool sourceReady = numIndices > 0;
+            while (sourceReady && offset < numIndices)
+            {
+                DirectSubSpan span;
+                span.first = firstIndex + offset;
+                size_t remaining = numIndices - offset;
+                sourceReady = primary
+                                  ? sourceSystem()->gpuSourceLaunchData(span.gpuSource, span.luminosityPerPacket,
+                                                                        span.first, remaining, &span.count)
+                                  : _secondarySourceSystem->gpuSourceLaunchData(
+                                        span.gpuSource, span.luminosityPerPacket, span.first, remaining, &span.count);
+                if (!sourceReady || !span.count || span.count > remaining)
+                {
+                    sourceReady = false;
+                    break;
+                }
+                spans.push_back(span);
+                offset += span.count;
+            }
+            if (sourceReady && !spans.empty())
             {
                 vector<Direction> observerDirectionv;
                 vector<GpuFrameDetectorInfo> frameDetectorv;
@@ -1959,10 +2013,21 @@ bool MonteCarloSimulation::performLifeCycleWithBatchedFirstForcedStep(size_t fir
                                                     sedDetectorv))
                 {
                     size_t residentLifecycleRounds = 0;
-                    if (mediumSystem()->runHenyeyGreensteinScatteringLifeCyclesFromGpuSource(
-                            *gpuSource, firstIndex, numIndices, luminosityPerPacket, _config->pathLengthBias(),
-                            _config->minWeightReduction(), _config->minScattEvents(), observerDirectionv,
-                            frameDetectorv, sedDetectorv, store, primary, residentLifecycleRounds))
+                    bool allSpansOk = true;
+                    for (const DirectSubSpan& span : spans)
+                    {
+                        size_t spanRounds = 0;
+                        if (!mediumSystem()->runHenyeyGreensteinScatteringLifeCyclesFromGpuSource(
+                                *span.gpuSource, span.first, span.count, span.luminosityPerPacket,
+                                _config->pathLengthBias(), _config->minWeightReduction(), _config->minScattEvents(),
+                                observerDirectionv, frameDetectorv, sedDetectorv, store, primary, spanRounds))
+                        {
+                            allSpansOk = false;
+                            break;
+                        }
+                        residentLifecycleRounds += spanRounds;
+                    }
+                    if (allSpansOk)
                     {
                         captureProfile(combinedStoreForcedMs);
                         if (profileBatch)

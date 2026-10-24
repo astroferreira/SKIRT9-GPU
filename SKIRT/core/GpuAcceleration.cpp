@@ -77,6 +77,24 @@ namespace
         return end != text && value > 0 ? static_cast<size_t>(value) : fallback;
     }
 
+    int environmentIntValue(const char* name, int fallback)
+    {
+        const char* text = std::getenv(name);
+        if (!text) return fallback;
+        char* end = nullptr;
+        long value = std::strtol(text, &end, 10);
+        return end != text ? static_cast<int>(value) : fallback;
+    }
+
+    double environmentDoubleValue(const char* name, double fallback)
+    {
+        const char* text = std::getenv(name);
+        if (!text) return fallback;
+        char* end = nullptr;
+        double value = std::strtod(text, &end);
+        return end != text && std::isfinite(value) ? value : fallback;
+    }
+
     size_t minGpuSegments()
     {
         const char* text = std::getenv("SKIRTGPU_MIN_SEGMENTS");
@@ -2814,35 +2832,153 @@ static __device__ int skirt_voronoi_find_cell_float(
     return best;
 }
 
+static __device__ int skirt_voronoi_find_cell_walk_float(
+    const float* sitev, int numCells, const int* neighborBeginv, const int* neighborCountv,
+    const int* neighborIndexv, const int* blockBeginv, const int* blockCountv,
+    const int* blockIndexv, int blockN, float rx, float ry, float rz,
+    float xmax, float ymax, float zmax, int hintCell)
+{
+    if (rx < 0.0f || rx > xmax || ry < 0.0f || ry > ymax || rz < 0.0f || rz > zmax || numCells <= 0)
+        return -1;
+
+    if (neighborBeginv && neighborCountv && neighborIndexv)
+    {
+        int cur = (hintCell >= 0 && hintCell < numCells) ? hintCell : -1;
+        float bestDistance = 3.402823466e+38F;
+        if (cur >= 0)
+        {
+            int base = 3 * cur;
+            float dx = rx - sitev[base];
+            float dy = ry - sitev[base + 1];
+            float dz = rz - sitev[base + 2];
+            bestDistance = dx * dx + dy * dy + dz * dz;
+        }
+        else if (blockN > 0 && blockBeginv && blockCountv && blockIndexv)
+        {
+            int i = static_cast<int>(blockN * rx / xmax);
+            int j = static_cast<int>(blockN * ry / ymax);
+            int k = static_cast<int>(blockN * rz / zmax);
+            i = i < 0 ? 0 : (i >= blockN ? blockN - 1 : i);
+            j = j < 0 ? 0 : (j >= blockN ? blockN - 1 : j);
+            k = k < 0 ? 0 : (k >= blockN ? blockN - 1 : k);
+            int block = i * blockN * blockN + j * blockN + k;
+            int begin = blockBeginv[block];
+            int count = blockCountv[block];
+            if (begin >= 0 && count > 0)
+            {
+                if (count <= 32)
+                {
+                    int best = -1;
+                    for (int p = 0; p != count; ++p)
+                    {
+                        int cell = blockIndexv[begin + p];
+                        if (cell < 0 || cell >= numCells) continue;
+                        int base = 3 * cell;
+                        float dx = rx - sitev[base];
+                        float dy = ry - sitev[base + 1];
+                        float dz = rz - sitev[base + 2];
+                        float distance = dx * dx + dy * dy + dz * dz;
+                        if (distance < bestDistance)
+                        {
+                            best = cell;
+                            bestDistance = distance;
+                        }
+                    }
+                    return best;
+                }
+                int stride = count >> 4;
+                if (stride < 1) stride = 1;
+                for (int p = 0; p < count; p += stride)
+                {
+                    int cell = blockIndexv[begin + p];
+                    if (cell < 0 || cell >= numCells) continue;
+                    int base = 3 * cell;
+                    float dx = rx - sitev[base];
+                    float dy = ry - sitev[base + 1];
+                    float dz = rz - sitev[base + 2];
+                    float distance = dx * dx + dy * dy + dz * dz;
+                    if (distance < bestDistance)
+                    {
+                        cur = cell;
+                        bestDistance = distance;
+                    }
+                }
+            }
+        }
+        if (cur >= 0)
+        {
+            for (int walkStep = 0; walkStep != 1024; ++walkStep)
+            {
+                int nbBegin = neighborBeginv[cur];
+                int nbCount = neighborCountv[cur];
+                int next = -1;
+                for (int m = 0; m != nbCount; ++m)
+                {
+                    int nb = neighborIndexv[nbBegin + m];
+                    if (nb >= 0 && nb < numCells)
+                    {
+                        int base = 3 * nb;
+                        float dx = rx - sitev[base];
+                        float dy = ry - sitev[base + 1];
+                        float dz = rz - sitev[base + 2];
+                        float dist = dx * dx + dy * dy + dz * dz;
+                        if (dist < bestDistance)
+                        {
+                            bestDistance = dist;
+                            next = nb;
+                        }
+                    }
+                }
+                if (next < 0) return cur;
+                cur = next;
+            }
+        }
+    }
+
+    return skirt_voronoi_find_cell_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN,
+                                         rx, ry, rz, xmax, ymax, zmax);
+}
+
 static __device__ float skirt_block_column_density_upper_bound(
     const float* blockMaxDensityv, int blockN, float eps,
     float rx, float ry, float rz, float kx, float ky, float kz,
-    float xmax, float ymax, float zmax, float globalMaxDensity)
+    float xmax, float ymax, float zmax, float globalMaxDensity, float requiredColumn)
 {
     constexpr float huge = 3.402823466e+38F;
     if (!blockMaxDensityv || blockN <= 0 || rx < 0.0f || rx > xmax || ry < 0.0f || ry > ymax
         || rz < 0.0f || rz > zmax)
         return globalMaxDensity * sqrtf(xmax * xmax + ymax * ymax + zmax * zmax);
+    float invDx = static_cast<float>(blockN) / xmax;
+    float invDy = static_cast<float>(blockN) / ymax;
+    float invDz = static_cast<float>(blockN) / zmax;
+    float dx = xmax / static_cast<float>(blockN);
+    float dy = ymax / static_cast<float>(blockN);
+    float dz = zmax / static_cast<float>(blockN);
+    float invKx = kx != 0.0f ? 1.0f / kx : 0.0f;
+    float invKy = ky != 0.0f ? 1.0f / ky : 0.0f;
+    float invKz = kz != 0.0f ? 1.0f / kz : 0.0f;
     float column = 0.0f;
     int maxSteps = 4 * blockN + 8;
     for (int step = 0; step != maxSteps; ++step)
     {
-        int bi = static_cast<int>(blockN * rx / xmax);
-        int bj = static_cast<int>(blockN * ry / ymax);
-        int bk = static_cast<int>(blockN * rz / zmax);
+        int bi = static_cast<int>(rx * invDx);
+        int bj = static_cast<int>(ry * invDy);
+        int bk = static_cast<int>(rz * invDz);
         bi = bi < 0 ? 0 : (bi >= blockN ? blockN - 1 : bi);
         bj = bj < 0 ? 0 : (bj >= blockN ? blockN - 1 : bj);
         bk = bk < 0 ? 0 : (bk >= blockN ? blockN - 1 : bk);
-        int block = bi * blockN * blockN + bj * blockN + bk;
-        float xBoundary = (kx > 0.0f ? bi + 1 : bi) * xmax / blockN;
-        float yBoundary = (ky > 0.0f ? bj + 1 : bj) * ymax / blockN;
-        float zBoundary = (kz > 0.0f ? bk + 1 : bk) * zmax / blockN;
-        float tx = kx != 0.0f ? (xBoundary - rx) / kx : huge;
-        float ty = ky != 0.0f ? (yBoundary - ry) / ky : huge;
-        float tz = kz != 0.0f ? (zBoundary - rz) / kz : huge;
+        int block = (bi * blockN + bj) * blockN + bk;
+        float xBoundary = static_cast<float>(kx > 0.0f ? bi + 1 : bi) * dx;
+        float yBoundary = static_cast<float>(ky > 0.0f ? bj + 1 : bj) * dy;
+        float zBoundary = static_cast<float>(kz > 0.0f ? bk + 1 : bk) * dz;
+        float tx = kx != 0.0f ? (xBoundary - rx) * invKx : huge;
+        float ty = ky != 0.0f ? (yBoundary - ry) * invKy : huge;
+        float tz = kz != 0.0f ? (zBoundary - rz) * invKz : huge;
         float ds = fminf(tx, fminf(ty, tz));
         if (!(ds >= 0.0f) || !isfinite(ds)) return huge;
-        column += blockMaxDensityv[block] * (ds + 2.0f * eps);
+        column += __ldg(&blockMaxDensityv[block]) * (ds + 2.0f * eps);
+        if (column > requiredColumn)
+            return column * (1.0f + 16.0f * 1.1920928955078125e-7f);
         rx += kx * (ds + eps);
         ry += ky * (ds + eps);
         rz += kz * (ds + eps);
@@ -2999,8 +3135,10 @@ static __device__ bool skirt_voronoi_ray_next_float(
             ray->rx += ray->kx * eps;
             ray->ry += ray->ky * eps;
             ray->rz += ray->kz * eps;
-            ray->cell = skirt_voronoi_find_cell_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv,
-                                                       blockN, ray->rx, ray->ry, ray->rz, xmax, ymax, zmax);
+            ray->cell = skirt_voronoi_find_cell_walk_float(
+                sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv,
+                blockBeginv, blockCountv, blockIndexv, blockN,
+                ray->rx, ray->ry, ray->rz, xmax, ymax, zmax, cell);
             continue;
         }
 
@@ -3069,30 +3207,49 @@ static __device__ bool skirt_voronoi_ray_next_plane_float(
         int begin = neighborBeginv[cell];
         int n = neighborCountv[cell];
         int nextCell = -99;
-        float ds = 3.402823466e+38F;
+        float ds = 1.0e30F;
         for (int i = 0; i != n; ++i)
         {
             int neighbor = neighborIndexv[begin + i];
-            float si = 0.0f;
             if (neighbor >= 0)
             {
+#if SKIRT_FP32_PLANES
+                float4 plane = __ldg(reinterpret_cast<const float4*>(neighborPlanev) + (begin + i));
+                float ndotk = plane.x * ray->kx + plane.y * ray->ky + plane.z * ray->kz;
+                if (ndotk > 0.0f)
+                {
+                    float num = plane.w - plane.x * ray->rx - plane.y * ray->ry - plane.z * ray->rz;
+                    if (num > 0.0f && num <= ds * ndotk)
+                    {
+                        float si = num / ndotk;
+                        if (si > 0.0f && si < ds)
+                        {
+                            ds = si;
+                            nextCell = neighbor;
+                        }
+                    }
+                }
+#else
                 int planeBase = 4 * (begin + i);
-                float nx;
-                float ny;
-                float nz;
-                nx = skirt_plane_load(neighborPlanev[planeBase]);
-                ny = skirt_plane_load(neighborPlanev[planeBase + 1]);
-                nz = skirt_plane_load(neighborPlanev[planeBase + 2]);
+                float nx = skirt_plane_load(neighborPlanev[planeBase]);
+                float ny = skirt_plane_load(neighborPlanev[planeBase + 1]);
+                float nz = skirt_plane_load(neighborPlanev[planeBase + 2]);
                 float ndotk = nx * ray->kx + ny * ray->ky + nz * ray->kz;
                 if (ndotk > 0.0f)
                 {
-                    float offset;
-                    offset = skirt_plane_load(neighborPlanev[planeBase + 3]);
-                    si = (offset - nx * ray->rx - ny * ray->ry - nz * ray->rz) / ndotk;
+                    float offset = skirt_plane_load(neighborPlanev[planeBase + 3]);
+                    float si = (offset - nx * ray->rx - ny * ray->ry - nz * ray->rz) / ndotk;
+                    if (si > 0.0f && si < ds)
+                    {
+                        ds = si;
+                        nextCell = neighbor;
+                    }
                 }
+#endif
             }
             else
             {
+                float si = 0.0f;
                 if (neighbor == -1)
                     si = -ray->rx / ray->kx;
                 else if (neighbor == -2)
@@ -3105,11 +3262,11 @@ static __device__ bool skirt_voronoi_ray_next_plane_float(
                     si = -ray->rz / ray->kz;
                 else if (neighbor == -6)
                     si = (zmax - ray->rz) / ray->kz;
-            }
-            if (si > 0.0f && si < ds)
-            {
-                ds = si;
-                nextCell = neighbor;
+                if (si > 0.0f && si < ds)
+                {
+                    ds = si;
+                    nextCell = neighbor;
+                }
             }
         }
 
@@ -3118,8 +3275,10 @@ static __device__ bool skirt_voronoi_ray_next_plane_float(
             ray->rx += ray->kx * eps;
             ray->ry += ray->ky * eps;
             ray->rz += ray->kz * eps;
-            ray->cell = skirt_voronoi_find_cell_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv,
-                                                       blockN, ray->rx, ray->ry, ray->rz, xmax, ymax, zmax);
+            ray->cell = skirt_voronoi_find_cell_walk_float(
+                sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv,
+                blockBeginv, blockCountv, blockIndexv, blockN,
+                ray->rx, ray->ry, ray->rz, xmax, ymax, zmax, cell);
             continue;
         }
 
@@ -3199,8 +3358,10 @@ static __device__ bool skirt_voronoi_ray_next_detector_plane_float(
             ray->rx += ray->kx * eps;
             ray->ry += ray->ky * eps;
             ray->rz += ray->kz * eps;
-            ray->cell = skirt_voronoi_find_cell_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv,
-                                                       blockN, ray->rx, ray->ry, ray->rz, xmax, ymax, zmax);
+            ray->cell = skirt_voronoi_find_cell_walk_float(
+                sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv,
+                blockBeginv, blockCountv, blockIndexv, blockN,
+                ray->rx, ray->ry, ray->rz, xmax, ymax, zmax, cell);
             continue;
         }
 
@@ -3217,6 +3378,259 @@ static __device__ bool skirt_voronoi_ray_next_detector_plane_float(
     return false;
 }
 
+static __device__ __forceinline__ float skirt_detector_tau_volume_trilinear(
+    const float* vol, int Nu, int Nv, int Nw, float fu, float fv, float fw)
+{
+    int iu = static_cast<int>(floorf(fu));
+    int iv = static_cast<int>(floorf(fv));
+    int iw = static_cast<int>(floorf(fw));
+    if (iu < 0)
+    {
+        iu = 0;
+        fu = 0.0f;
+    }
+    else if (iu >= Nu - 1)
+    {
+        iu = Nu - 2;
+        fu = static_cast<float>(Nu - 1);
+    }
+    if (iv < 0)
+    {
+        iv = 0;
+        fv = 0.0f;
+    }
+    else if (iv >= Nv - 1)
+    {
+        iv = Nv - 2;
+        fv = static_cast<float>(Nv - 1);
+    }
+    if (iw < 0)
+    {
+        iw = 0;
+        fw = 0.0f;
+    }
+    else if (iw >= Nw - 1)
+    {
+        iw = Nw - 2;
+        fw = static_cast<float>(Nw - 1);
+    }
+
+    float tu = fu - static_cast<float>(iu);
+    float tv = fv - static_cast<float>(iv);
+    float tw = fw - static_cast<float>(iw);
+
+    unsigned long long strideV = static_cast<unsigned long long>(Nw);
+    unsigned long long strideU = static_cast<unsigned long long>(Nv) * strideV;
+    const float* base00 = vol + static_cast<unsigned long long>(iu) * strideU
+                          + static_cast<unsigned long long>(iv) * strideV + iw;
+    const float* base01 = base00 + strideV;
+    const float* base10 = base00 + strideU;
+    const float* base11 = base10 + strideV;
+
+    float c00 = base00[0] + tw * (base00[1] - base00[0]);
+    float c01 = base01[0] + tw * (base01[1] - base01[0]);
+    float c10 = base10[0] + tw * (base10[1] - base10[0]);
+    float c11 = base11[0] + tw * (base11[1] - base11[0]);
+
+    float c0 = c00 + tv * (c01 - c00);
+    float c1 = c10 + tv * (c11 - c10);
+    return fmaxf(0.0f, c0 + tu * (c1 - c0));
+}
+
+static __device__ __forceinline__ float skirt_detector_tau_volume_sample(
+    const float* detectorTauVolumev, const float* header, const int* headerInt,
+    float u, float v, float w)
+{
+    int Nu = headerInt[2];
+    int Nv = headerInt[3];
+    int Nw = headerInt[4];
+    float maxU = static_cast<float>(Nu - 1);
+    float maxV = static_cast<float>(Nv - 1);
+    float maxW = static_cast<float>(Nw - 1);
+    if (headerInt[6])
+    {
+        unsigned int coreOffset = static_cast<unsigned int>(headerInt[1]);
+        if (coreOffset > 0U)
+        {
+            float cfu = (u - header[15]) * header[18];
+            float cfv = (v - header[16]) * header[19];
+            float cfw = (w - header[17]) * header[20];
+            if (cfu >= 0.0f && cfu <= maxU && cfv >= 0.0f && cfv <= maxV && cfw >= 0.0f && cfw <= maxW)
+            {
+                return skirt_detector_tau_volume_trilinear(
+                    detectorTauVolumev + coreOffset, Nu, Nv, Nw, cfu, cfv, cfw);
+            }
+        }
+    }
+    unsigned int outerOffset = static_cast<unsigned int>(headerInt[0]);
+    if (outerOffset == 0U) return 0.0f;
+    float fu = (u - header[9]) * header[12];
+    float fv = (v - header[10]) * header[13];
+    float fw = (w - header[11]) * header[14];
+    if (fw >= maxW || fu < 0.0f || fu > maxU || fv < 0.0f || fv > maxV) return 0.0f;
+    if (fw < 0.0f) fw = 0.0f;
+    return skirt_detector_tau_volume_trilinear(
+        detectorTauVolumev + outerOffset, Nu, Nv, Nw, fu, fv, fw);
+}
+
+extern "C" __global__ void lifecycle_build_detector_tau_volume(
+    const float* sitev, const int* neighborBeginv, const int* neighborCountv,
+    const int* neighborIndexv, const SkirtPlaneValue* detectorPlanev, int numNeighborPlanes,
+    const int* blockBeginv, const int* blockCountv, const int* blockIndexv, int blockN,
+    int numCells, float eps, float xmax, float ymax, float zmax, const float* densityv,
+    int observerIndex, float* detectorTauVolumev, int* statusv)
+{
+    const float* header = detectorTauVolumev + 32 * observerIndex;
+    const int* headerInt = reinterpret_cast<const int*>(header + 24);
+    int isCore = static_cast<int>(blockIdx.y);
+    if (isCore && !headerInt[6]) return;
+    unsigned int volumeOffset = static_cast<unsigned int>(isCore ? headerInt[1] : headerInt[0]);
+    if (volumeOffset == 0U) return;
+    int Nu = headerInt[2];
+    int Nv = headerInt[3];
+    int Nw = headerInt[4];
+    int columnIndex = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (columnIndex >= Nu * Nv) return;
+
+    int iu = columnIndex / Nv;
+    int iv = columnIndex - iu * Nv;
+
+    float ux = header[0], uy = header[1], uz = header[2];
+    float vx = header[3], vy = header[4], vz = header[5];
+    float kx = header[6], ky = header[7], kz = header[8];
+    float umin = isCore ? header[15] : header[9];
+    float vmin = isCore ? header[16] : header[10];
+    float wmin = isCore ? header[17] : header[11];
+    float invDu = isCore ? header[18] : header[12];
+    float invDv = isCore ? header[19] : header[13];
+    float invDw = isCore ? header[20] : header[14];
+    float dw = invDw > 0.0f ? (1.0f / invDw) : 0.0f;
+
+    float u = umin + (invDu > 0.0f ? static_cast<float>(iu) / invDu : 0.0f);
+    float v = vmin + (invDv > 0.0f ? static_cast<float>(iv) / invDv : 0.0f);
+
+    float rxBase = ux * u + vx * v;
+    float ryBase = uy * u + vy * v;
+    float rzBase = uz * u + vz * v;
+
+    float wEnter = -3.402823466e+38F;
+    float wExit = 3.402823466e+38F;
+    float boundsMax[3] = {xmax, ymax, zmax};
+    float rBase[3] = {rxBase, ryBase, rzBase};
+    float kDir[3] = {kx, ky, kz};
+    float* col = detectorTauVolumev + static_cast<unsigned long long>(volumeOffset)
+                 + static_cast<unsigned long long>(columnIndex) * static_cast<unsigned long long>(Nw);
+
+    for (int axis = 0; axis != 3; ++axis)
+    {
+        float ka = kDir[axis];
+        float ra = rBase[axis];
+        float bmax = boundsMax[axis];
+        if (fabsf(ka) > 1.0e-7f)
+        {
+            float t0 = -ra / ka;
+            float t1 = (bmax - ra) / ka;
+            float tmin = fminf(t0, t1);
+            float tmax = fmaxf(t0, t1);
+            wEnter = fmaxf(wEnter, tmin);
+            wExit = fminf(wExit, tmax);
+        }
+        else if (ra <= 0.0f || ra >= bmax)
+        {
+            for (int iw = 0; iw != Nw; ++iw) col[iw] = 0.0f;
+            return;
+        }
+    }
+
+    if (!(wEnter + 2.0f * eps < wExit))
+    {
+        for (int iw = 0; iw != Nw; ++iw) col[iw] = 0.0f;
+        return;
+    }
+
+    float wStart = wEnter + eps;
+    float rx = fminf(xmax - eps, fmaxf(eps, rxBase + kx * wStart));
+    float ry = fminf(ymax - eps, fmaxf(eps, ryBase + ky * wStart));
+    float rz = fminf(zmax - eps, fmaxf(eps, rzBase + kz * wStart));
+    int startCell = skirt_voronoi_find_cell_walk_float(
+        sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv, blockBeginv, blockCountv, blockIndexv,
+        blockN, rx, ry, rz, xmax, ymax, zmax, -1);
+    if (startCell < 0)
+    {
+        for (int iw = 0; iw != Nw; ++iw) col[iw] = 0.0f;
+        return;
+    }
+
+    SkirtVoronoiRayStateFloat ray;
+    ray.rx = rx;
+    ray.ry = ry;
+    ray.rz = rz;
+    ray.kx = kx;
+    ray.ky = ky;
+    ray.kz = kz;
+    ray.distance = wStart;
+    ray.cell = startCell;
+    ray.guard = 0;
+    ray.maxGuard = 8 * (numCells + 1);
+
+    int iw = 0;
+    while (iw < Nw && (wmin + static_cast<float>(iw) * dw) <= wStart)
+    {
+        col[iw] = 0.0f;
+        ++iw;
+    }
+
+    float cumColumn = 0.0f;
+    int cell = -1;
+    float ds = 0.0f;
+    int localStatus = 1;
+    int sharedPlanes = numNeighborPlanes < 0 ? 1 : 0;
+    const SkirtPlaneValue* obsPlanev =
+        sharedPlanes
+            ? detectorPlanev
+            : detectorPlanev + SKIRT_DETECTOR_PLANE_UNITS(numCells, numNeighborPlanes) * observerIndex;
+
+    while (sharedPlanes
+               ? skirt_voronoi_ray_next_plane_float(
+                     sitev, neighborBeginv, neighborCountv, neighborIndexv, obsPlanev,
+                     blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax, zmax,
+                     &ray, &cell, &ds, &localStatus)
+               : skirt_voronoi_ray_next_detector_plane_float(
+                     sitev, neighborBeginv, neighborCountv, neighborIndexv, obsPlanev,
+                     blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax, zmax,
+                     &ray, &cell, &ds, &localStatus))
+    {
+        float w0 = ray.distance - ds;
+        float w1 = ray.distance;
+        float rho = densityv[cell];
+        while (iw < Nw)
+        {
+            float wGrid = wmin + static_cast<float>(iw) * dw;
+            if (wGrid > w1) break;
+            float d = fmaxf(0.0f, wGrid - w0);
+            col[iw] = cumColumn + rho * d;
+            ++iw;
+        }
+        cumColumn += rho * ds;
+    }
+    if (localStatus != 1)
+    {
+        atomicExch(statusv, 0);
+        return;
+    }
+
+    while (iw < Nw)
+    {
+        col[iw] = cumColumn;
+        ++iw;
+    }
+    for (int k = 0; k != Nw; ++k)
+    {
+        float rem = cumColumn - col[k];
+        col[k] = rem > 0.0f ? rem : 0.0f;
+    }
+}
+
 static __device__ float skirt_voronoi_trace_total_float(
     const float* sitev, const int* neighborBeginv, const int* neighborCountv,
     const int* neighborIndexv, const SkirtPlaneValue* detectorPlanev, int sharedPlanes,
@@ -3225,7 +3639,8 @@ static __device__ float skirt_voronoi_trace_total_float(
     float xmax, float ymax, float zmax, double xminPhysical, double yminPhysical,
     double zminPhysical, float coordinateScale, const double* positionv, int positionBase,
     float kx, float ky, float kz, double maxDistancePhysical, const float* densityv,
-    float sectionExtScaled, int initialCell, int* statusOut)
+    float sectionExtScaled, int initialCell, const float* detectorTauVolumev, int observerIndex,
+    int* statusOut)
 {
     // sharedPlanes: detectorPlanev holds the direction-independent face planes used by transport instead of
     // the per-observer cache, which needs too much memory for large meshes with many observers
@@ -3233,6 +3648,61 @@ static __device__ float skirt_voronoi_trace_total_float(
     float rx = static_cast<float>((positionv[positionBase] - xminPhysical) * coordinateScale);
     float ry = static_cast<float>((positionv[positionBase + 1] - yminPhysical) * coordinateScale);
     float rz = static_cast<float>((positionv[positionBase + 2] - zminPhysical) * coordinateScale);
+    if (detectorTauVolumev && observerIndex >= 0 && !(maxDistancePhysical < 1.0e300))
+    {
+        const float* header = detectorTauVolumev + 32 * observerIndex;
+        const int* headerInt = reinterpret_cast<const int*>(header + 24);
+        if (static_cast<unsigned int>(headerInt[0]) > 0U)
+        {
+            float ux = header[0], uy = header[1], uz = header[2];
+            float vx = header[3], vy = header[4], vz = header[5];
+            float u0 = ux * rx + uy * ry + uz * rz;
+            float v0 = vx * rx + vy * ry + vz * rz;
+            int maxExactSteps = headerInt[5];
+            if (maxExactSteps <= 0)
+            {
+                float w0 = kx * rx + ky * ry + kz * rz;
+                return sectionExtScaled
+                       * skirt_detector_tau_volume_sample(detectorTauVolumev, header, headerInt, u0, v0, w0);
+            }
+            SkirtVoronoiRayStateFloat ray;
+            if (!skirt_voronoi_ray_start_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv,
+                                               blockN, eps, rx, ry, rz, kx, ky, kz, xmax, ymax, zmax,
+                                               initialCell, &ray))
+                return 0.0f;
+            float alphaDu = header[21];
+            float localColumn = 0.0f;
+            int cell = -1;
+            float ds = 0.0f;
+            bool exitedBox = false;
+            for (int step = 0; step < maxExactSteps; ++step)
+            {
+                bool hasNext =
+                    sharedPlanes
+                        ? skirt_voronoi_ray_next_plane_float(
+                              sitev, neighborBeginv, neighborCountv, neighborIndexv, detectorPlanev,
+                              blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax,
+                              zmax, &ray, &cell, &ds, statusOut)
+                        : skirt_voronoi_ray_next_detector_plane_float(
+                              sitev, neighborBeginv, neighborCountv, neighborIndexv, detectorPlanev,
+                              blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax,
+                              zmax, &ray, &cell, &ds, statusOut);
+                if (!hasNext)
+                {
+                    exitedBox = true;
+                    break;
+                }
+                localColumn += densityv[cell] * ds;
+                if (ds >= alphaDu) break;
+            }
+            if (statusOut[0] != 1) return 0.0f;
+            if (exitedBox || ray.cell < 0) return sectionExtScaled * localColumn;
+            float w = kx * ray.rx + ky * ray.ry + kz * ray.rz;
+            float remColumn =
+                skirt_detector_tau_volume_sample(detectorTauVolumev, header, headerInt, u0, v0, w);
+            return sectionExtScaled * (localColumn + remColumn);
+        }
+    }
     float maxDistance = static_cast<float>(maxDistancePhysical * coordinateScale);
     SkirtVoronoiRayStateFloat ray;
     if (!skirt_voronoi_ray_start_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN,
@@ -3493,30 +3963,45 @@ static __device__ int skirt_section_lookup_index(const double* lookupWavelengthv
 }
 
 extern "C" __global__ void lifecycle_prepare_lookup_pairs(
-    const double* lambdav, int numPackets, const double* lookupWavelengthv,
-    int sectionLookupBegin, int sectionLookupCount, int hgLookupBegin, int hgLookupCount,
-    unsigned int* lookupPairv, const float* sitev, int numCells,
+    const double* lambdav, const double* luminosityv, int numPackets,
+    const int* activeIndexv, int numActivePackets,
+    const double* lookupWavelengthv, int sectionLookupBegin, int sectionLookupCount,
+    int hgLookupBegin, int hgLookupCount, unsigned int* lookupPairv, const float* sitev, int numCells,
+    const int* neighborBeginv, const int* neighborCountv, const int* neighborIndexv,
     const int* blockBeginv, const int* blockCountv, const int* blockIndexv, int blockN,
     float xmax, float ymax, float zmax, double xminPhysical, double yminPhysical, double zminPhysical,
     float coordinateScale, const double* positionv, int* cellOutv, int prepareInitialCell)
 {
-    int packet = blockIdx.x * blockDim.x + threadIdx.x;
-    if (packet >= numPackets) return;
+    int activeSlot = blockIdx.x * blockDim.x + threadIdx.x;
+    int numTargetPackets = activeIndexv ? numActivePackets : numPackets;
+    if (activeSlot >= numTargetPackets) return;
+    int packet = activeIndexv ? activeIndexv[activeSlot] : activeSlot;
+    if (packet < 0 || packet >= numPackets) return;
+    if (luminosityv && !(luminosityv[packet] > 0.0))
+    {
+        if (prepareInitialCell) cellOutv[packet] = -1;
+        return;
+    }
     double lambda = lambdav[packet];
     unsigned int sectionOffset = static_cast<unsigned int>(
         skirt_section_lookup_index(lookupWavelengthv, sectionLookupBegin, sectionLookupCount, lambda)
         - sectionLookupBegin);
-    unsigned int hgOffset = static_cast<unsigned int>(
-        skirt_section_lookup_index(lookupWavelengthv, hgLookupBegin, hgLookupCount, lambda) - hgLookupBegin);
+    unsigned int hgOffset =
+        (hgLookupBegin == sectionLookupBegin && hgLookupCount == sectionLookupCount)
+            ? sectionOffset
+            : static_cast<unsigned int>(
+                  skirt_section_lookup_index(lookupWavelengthv, hgLookupBegin, hgLookupCount, lambda) - hgLookupBegin);
     lookupPairv[packet] = sectionOffset | (hgOffset << 16);
     if (prepareInitialCell)
     {
+        int hintCell = prepareInitialCell > 1 ? cellOutv[packet] : -1;
         int base = 3 * packet;
         float rx = static_cast<float>((positionv[base] - xminPhysical) * coordinateScale);
         float ry = static_cast<float>((positionv[base + 1] - yminPhysical) * coordinateScale);
         float rz = static_cast<float>((positionv[base + 2] - zminPhysical) * coordinateScale);
-        cellOutv[packet] = skirt_voronoi_find_cell_float(
-            sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN, rx, ry, rz, xmax, ymax, zmax);
+        cellOutv[packet] = skirt_voronoi_find_cell_walk_float(
+            sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv, blockBeginv, blockCountv,
+            blockIndexv, blockN, rx, ry, rz, xmax, ymax, zmax, hintCell);
     }
 }
 
@@ -3799,14 +4284,25 @@ extern "C" __global__ void accumulate_values_by_key(const int* inputKeyv, const 
 static __device__ double skirt_band_relative_transmission(const double* wavelengthv, const double* transv,
                                                           int begin, int end, double width, double lambda)
 {
-    if (end - begin < 2) return 0.0;
-    if (!(lambda > wavelengthv[begin] && lambda < wavelengthv[end - 1])) return 0.0;
+    int count = end - begin;
+    if (count < 2) return 0.0;
+    double xfirst = wavelengthv[begin];
+    double xlast = wavelengthv[end - 1];
+    if (!(lambda > xfirst && lambda < xlast)) return 0.0;
+    if (count == 2)
+    {
+        double y0 = transv[begin];
+        double y1 = transv[begin + 1];
+        if (y0 == y1) return y0 * width;
+        double t = xlast != xfirst ? (lambda - xfirst) / (xlast - xfirst) : 0.0;
+        return (y0 + t * (y1 - y0)) * width;
+    }
 
     int lo = begin + 1;
     int hi = end;
     while (lo < hi)
     {
-        int mid = lo + (hi - lo) / 2;
+        int mid = (lo + hi) >> 1;
         if (lambda < wavelengthv[mid])
             hi = mid;
         else
@@ -3823,6 +4319,23 @@ static __device__ double skirt_band_relative_transmission(const double* waveleng
     return (y0 + t * (y1 - y0)) * width;
 }
 
+static __device__ __forceinline__ int skirt_frame_band_first_candidate(
+    const int* bandOffsetv, const double* bandWavelengthv, int frameBandBegin, int numBands, double observed)
+{
+    int lo = 0;
+    int hi = numBands;
+    while (lo < hi)
+    {
+        int mid = (lo + hi) >> 1;
+        int end = bandOffsetv[frameBandBegin + mid + 1];
+        if (bandWavelengthv[end - 1] <= observed)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
 // A false result guarantees zero detector contribution. Keep the Frame and SED tests
 // independent: instruments sharing an observer can have different wavelength grids/redshifts.
 // This helper only rejects detection; primary photons must still heat the dust at all wavelengths.
@@ -3832,16 +4345,30 @@ static __device__ bool skirt_detector_accepts_wavelength(
     const double* bandWavelengthv, const double* bandTransmissionv, const double* bandWidthv,
     const double* sedBorderPairv)
 {
-    if (accumulatorAddress[0])
+    int rawBandCount = detectorInt[4];
+    int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
+    if (accumulatorAddress[0] && frameBandCount > 0)
     {
         double observed = lambda * (1.0 + detectorDouble[13]);
-        for (int localBand = 0; localBand < detectorInt[4]; ++localBand)
+        int frameBandBegin = detectorInt[3];
+        if (rawBandCount >= 0
+            || (observed > bandWavelengthv[bandOffsetv[frameBandBegin]]
+                && observed < bandWavelengthv[bandOffsetv[frameBandBegin + frameBandCount] - 1]))
         {
-            int band = detectorInt[3] + localBand;
-            if (skirt_band_relative_transmission(bandWavelengthv, bandTransmissionv,
-                                                bandOffsetv[band], bandOffsetv[band + 1],
-                                                bandWidthv[band], observed) != 0.0)
-                return true;
+            int startBand = rawBandCount < 0
+                                ? skirt_frame_band_first_candidate(bandOffsetv, bandWavelengthv,
+                                                                   frameBandBegin, frameBandCount, observed)
+                                : 0;
+            for (int localBand = startBand; localBand < frameBandCount; ++localBand)
+            {
+                int band = frameBandBegin + localBand;
+                int begin = bandOffsetv[band];
+                if (rawBandCount < 0 && bandWavelengthv[begin] >= observed) break;
+                if (skirt_band_relative_transmission(bandWavelengthv, bandTransmissionv,
+                                                     begin, bandOffsetv[band + 1],
+                                                     bandWidthv[band], observed) != 0.0)
+                    return true;
+            }
         }
     }
     if (accumulatorAddress[1] && detectorInt[7] > 0)
@@ -3851,7 +4378,7 @@ static __device__ bool skirt_detector_accepts_wavelength(
         int lo = 0, hi = detectorInt[7];
         while (lo < hi)
         {
-            int mid = lo + (hi - lo) / 2;
+            int mid = (lo + hi) >> 1;
             if (sedBorderPairv[2 * (begin + mid)] <= observed) lo = mid + 1;
             else hi = mid;
         }
@@ -3900,17 +4427,21 @@ extern "C" __global__ void detector_wavelength_support_selftest(int* result)
     const bool sed[] = {false, true, false, false, false, false, false, false, false, true,
                         true, false, true, false};
     *result = 0;
-    for (int mode = 0; mode < 4; ++mode)
+    for (int sign = 1; sign >= -1; sign -= 2)
     {
-        address[0] = mode & 1;
-        address[1] = mode & 2;
-        for (int sample = 0; sample < 14; ++sample)
+        detectorInt[4] = sign;
+        for (int mode = 0; mode < 4; ++mode)
         {
-            bool expected = (address[0] && frame[sample]) || (address[1] && sed[sample]);
-            bool actual = skirt_detector_accepts_wavelength(samples[sample], detectorDouble, detectorInt,
-                                                            address, offsets, wavelengths, transmission,
-                                                            widths, borders);
-            if (actual != expected) { *result = 1 + mode * 14 + sample; return; }
+            address[0] = mode & 1;
+            address[1] = mode & 2;
+            for (int sample = 0; sample < 14; ++sample)
+            {
+                bool expected = (address[0] && frame[sample]) || (address[1] && sed[sample]);
+                bool actual = skirt_detector_accepts_wavelength(samples[sample], detectorDouble, detectorInt,
+                                                                address, offsets, wavelengths, transmission,
+                                                                widths, borders);
+                if (actual != expected) { *result = 1 + mode * 14 + sample; return; }
+            }
         }
     }
     // Frame and SED redshifts are independent even when they share an observer.
@@ -3985,6 +4516,13 @@ static __device__ double skirt_hg_value(double g, double costheta)
 {
     double t = 1.0 + g * g - 2.0 * g * costheta;
     return (1.0 - g) * (1.0 + g) / sqrt(t * t * t);
+}
+
+static __device__ float skirt_hg_value_float(float g, float costheta)
+{
+    float t = 1.0f + g * g - 2.0f * g * costheta;
+    float invSqrtT = rsqrtf(t);
+    return (1.0f - g) * (1.0f + g) * invSqrtT * invSqrtT * invSqrtT;
 }
 
 static __device__ double skirt_hg_integral(double g, double cosalpha, double cosbeta)
@@ -4172,34 +4710,53 @@ extern "C" __global__ void lifecycle_apply_forced_results(
 }
 
 extern "C" __global__ void lifecycle_compact_active_indices(const double* luminosityv, int numPackets,
-                                                             int* activeIndexv, int* activeCountv)
+                                                            const int* inputActiveIndexv, int numInputActivePackets,
+                                                            int* activeIndexv, int* activeCountv)
 {
-    constexpr int scanBlockSize = 256;
-    __shared__ int scanv[scanBlockSize];
+    __shared__ int warpOffsets[8];
     __shared__ int blockBase;
 
-    int localIndex = threadIdx.x;
-    int packet = blockIdx.x * blockDim.x + localIndex;
-    int active = packet < numPackets && luminosityv[packet] > 0.0 ? 1 : 0;
-    scanv[localIndex] = active;
-    __syncthreads();
-    for (int offset = 1; offset < scanBlockSize; offset <<= 1)
+    int localIndex = static_cast<int>(threadIdx.x);
+    int lane = localIndex & 31;
+    int warp = localIndex >> 5;
+    int activeSlot = static_cast<int>(blockIdx.x * blockDim.x) + localIndex;
+    int packet = -1;
+    bool active = false;
+    if (activeSlot < numInputActivePackets)
     {
-        int add = localIndex >= offset ? scanv[localIndex - offset] : 0;
-        __syncthreads();
-        scanv[localIndex] += add;
-        __syncthreads();
+        packet = inputActiveIndexv ? inputActiveIndexv[activeSlot] : activeSlot;
+        active = (packet >= 0 && packet < numPackets && luminosityv[packet] > 0.0);
     }
-
-    if (localIndex == scanBlockSize - 1) blockBase = atomicAdd(activeCountv, scanv[localIndex]);
+    unsigned int mask = __ballot_sync(0xffffffffU, active);
+    int warpCount = __popc(mask);
+    int lanePrefix = __popc(mask & ((1U << lane) - 1U));
+    if (lane == 0)
+        warpOffsets[warp] = warpCount;
     __syncthreads();
-    if (active) activeIndexv[blockBase + scanv[localIndex] - 1] = packet;
+    if (warp == 0)
+    {
+        int val = (lane < 8) ? warpOffsets[lane] : 0;
+        for (int offset = 1; offset < 8; offset <<= 1)
+        {
+            int n = __shfl_up_sync(0xffffffffU, val, offset);
+            if (lane >= offset) val += n;
+        }
+        int blockTotal = __shfl_sync(0xffffffffU, val, 7);
+        if (lane < 8)
+            warpOffsets[lane] = val - warpOffsets[lane];
+        if (lane == 0)
+            blockBase = blockTotal > 0 ? atomicAdd(activeCountv, blockTotal) : 0;
+    }
+    __syncthreads();
+    if (active)
+        activeIndexv[blockBase + warpOffsets[warp] + lanePrefix] = packet;
 }
 
 extern "C" __global__ void lifecycle_henyey_greenstein_scatter(
     double* directionv, const double* lambdav, const double* luminosityv, const double* randomCosthetav,
     const double* randomPhiv, int* numScattv, int numPackets, const int* activeIndexv, int numActivePackets,
-    int lookupBegin, int lookupCount, const double* lookupWavelengthv, const double* asymmparv)
+    const unsigned int* lookupPairv, int lookupBegin, int lookupCount, const double* lookupWavelengthv,
+    const double* asymmparv)
 {
     int activeSlot = blockIdx.x * blockDim.x + threadIdx.x;
     if (activeSlot >= numActivePackets) return;
@@ -4207,7 +4764,9 @@ extern "C" __global__ void lifecycle_henyey_greenstein_scatter(
     if (packet < 0 || packet >= numPackets || luminosityv[packet] <= 0.0) return;
 
     constexpr double pi = 3.14159265358979323846264338327950288;
-    int tableIndex = skirt_section_lookup_index(lookupWavelengthv, lookupBegin, lookupCount, lambdav[packet]);
+    int tableIndex =
+        lookupPairv ? (lookupBegin + static_cast<int>(lookupPairv[packet] >> 16))
+                    : skirt_section_lookup_index(lookupWavelengthv, lookupBegin, lookupCount, lambdav[packet]);
     double g = asymmparv[tableIndex];
     double u = randomCosthetav[packet];
     double phi = 2.0 * pi * randomPhiv[packet];
@@ -5184,7 +5743,8 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate(
     if (luminosity == 0.0) return;
 
     unsigned long long frameAddress = accumulatorAddressv[2 * observerIndex];
-    int frameBandCount = detectorInt[4];
+    int rawBandCount = detectorInt[4];
+    int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
     if (frameAddress && frameBandCount > 0)
     {
         double x = positionv[packetBase];
@@ -5203,11 +5763,17 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate(
             int pixel = i + detectorInt[0] * j;
             double lambdaObserved = lambda * (1.0 + detectorDouble[13]);
             int frameBandBegin = detectorInt[3];
-            for (int localBand = 0; localBand != frameBandCount; ++localBand)
+            int firstLocalBand = rawBandCount < 0
+                                     ? skirt_frame_band_first_candidate(
+                                           bandOffsetv, bandWavelengthv, frameBandBegin, frameBandCount, lambdaObserved)
+                                     : 0;
+            for (int localBand = firstLocalBand; localBand != frameBandCount; ++localBand)
             {
                 int band = frameBandBegin + localBand;
+                int begin = bandOffsetv[band];
+                if (rawBandCount < 0 && bandWavelengthv[begin] >= lambdaObserved) break;
                 double transmission = skirt_band_relative_transmission(
-                    bandWavelengthv, bandTransmissionv, bandOffsetv[band], bandOffsetv[band + 1],
+                    bandWavelengthv, bandTransmissionv, begin, bandOffsetv[band + 1],
                     bandWidthv[band], lambdaObserved);
                 if (transmission == 0.0) continue;
                 int key = pixel + localBand * detectorInt[2];
@@ -5263,35 +5829,48 @@ static __device__ void skirt_detector_accumulate_slot(
     const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv)
 {
     unsigned long long frameAddress = address[0];
-    int frameBandCount = detectorInt[4];
+    int rawBandCount = detectorInt[4];
+    int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
     if (frameAddress && frameBandCount > 0)
     {
-        double x = position[0];
-        double y = position[1];
-        double z = position[2];
-        double xpp = -detectorDouble[6] * x + detectorDouble[5] * y;
-        double ypp = -detectorDouble[5] * detectorDouble[3] * x
-                     - detectorDouble[6] * detectorDouble[3] * y + detectorDouble[4] * z;
-        double xp = detectorDouble[7] * xpp - detectorDouble[8] * ypp;
-        double yp = detectorDouble[8] * xpp + detectorDouble[7] * ypp;
-        int i = static_cast<int>(floor((xp - detectorDouble[9]) / detectorDouble[10]));
-        int j = static_cast<int>(floor((yp - detectorDouble[11]) / detectorDouble[12]));
-        if (i >= 0 && i < detectorInt[0] && j >= 0 && j < detectorInt[1])
+        double lambdaObserved = lambda * (1.0 + detectorDouble[13]);
+        int frameBandBegin = detectorInt[3];
+        if (rawBandCount >= 0
+            || (lambdaObserved > bandWavelengthv[bandOffsetv[frameBandBegin]]
+                && lambdaObserved < bandWavelengthv[bandOffsetv[frameBandBegin + frameBandCount] - 1]))
         {
-            double* frameAccumulator = reinterpret_cast<double*>(frameAddress);
-            int pixel = i + detectorInt[0] * j;
-            double lambdaObserved = lambda * (1.0 + detectorDouble[13]);
-            int frameBandBegin = detectorInt[3];
-            for (int localBand = 0; localBand != frameBandCount; ++localBand)
+            double x = position[0];
+            double y = position[1];
+            double z = position[2];
+            double xpp = -detectorDouble[6] * x + detectorDouble[5] * y;
+            double ypp = -detectorDouble[5] * detectorDouble[3] * x
+                         - detectorDouble[6] * detectorDouble[3] * y + detectorDouble[4] * z;
+            double xp = detectorDouble[7] * xpp - detectorDouble[8] * ypp;
+            double yp = detectorDouble[8] * xpp + detectorDouble[7] * ypp;
+            int i = static_cast<int>(floor((xp - detectorDouble[9]) / detectorDouble[10]));
+            int j = static_cast<int>(floor((yp - detectorDouble[11]) / detectorDouble[12]));
+            if (i >= 0 && i < detectorInt[0] && j >= 0 && j < detectorInt[1])
             {
-                int band = frameBandBegin + localBand;
-                double transmission = skirt_band_relative_transmission(
-                    bandWavelengthv, bandTransmissionv, bandOffsetv[band], bandOffsetv[band + 1],
-                    bandWidthv[band], lambdaObserved);
-                if (transmission == 0.0) continue;
-                int key = pixel + localBand * detectorInt[2];
-                if (key >= 0 && key < detectorInt[5])
-                    skirt_atomic_add_double(frameAccumulator + key, luminosity * transmission);
+                double* frameAccumulator = reinterpret_cast<double*>(frameAddress);
+                int pixel = i + detectorInt[0] * j;
+                int firstLocalBand = rawBandCount < 0
+                                         ? skirt_frame_band_first_candidate(
+                                               bandOffsetv, bandWavelengthv, frameBandBegin, frameBandCount,
+                                               lambdaObserved)
+                                         : 0;
+                for (int localBand = firstLocalBand; localBand != frameBandCount; ++localBand)
+                {
+                    int band = frameBandBegin + localBand;
+                    int begin = bandOffsetv[band];
+                    if (rawBandCount < 0 && bandWavelengthv[begin] >= lambdaObserved) break;
+                    double transmission = skirt_band_relative_transmission(
+                        bandWavelengthv, bandTransmissionv, begin, bandOffsetv[band + 1],
+                        bandWidthv[band], lambdaObserved);
+                    if (transmission == 0.0) continue;
+                    int key = pixel + localBand * detectorInt[2];
+                    if (key >= 0 && key < detectorInt[5])
+                        skirt_atomic_add_double(frameAccumulator + key, luminosity * transmission);
+                }
             }
         }
     }
@@ -5300,38 +5879,201 @@ static __device__ void skirt_detector_accumulate_slot(
     int sedBinCount = detectorInt[7];
     if (sedAddress && sedBinCount > 0)
     {
-        double radiusSquared = detectorDouble[18];
-        if (radiusSquared > 0.0)
-        {
-            double x = position[0];
-            double y = position[1];
-            double z = position[2];
-            double xpp = -detectorDouble[17] * x + detectorDouble[16] * y;
-            double ypp = -detectorDouble[16] * detectorDouble[14] * x
-                         - detectorDouble[17] * detectorDouble[14] * y + detectorDouble[15] * z;
-            if (xpp * xpp + ypp * ypp > radiusSquared) return;
-        }
-
         double lambdaObserved = lambda * (1.0 + detectorDouble[19]);
         int sedBinBegin = detectorInt[6];
-        int lo = 0;
-        int hi = sedBinCount;
-        while (lo < hi)
+        if (lambdaObserved >= sedBorderPairv[2 * sedBinBegin]
+            && lambdaObserved < sedBorderPairv[2 * (sedBinBegin + sedBinCount - 1) + 1])
         {
-            int mid = lo + (hi - lo) / 2;
-            if (sedBorderPairv[2 * (sedBinBegin + mid)] <= lambdaObserved)
-                lo = mid + 1;
-            else
-                hi = mid;
+            double radiusSquared = detectorDouble[18];
+            if (radiusSquared > 0.0)
+            {
+                double x = position[0];
+                double y = position[1];
+                double z = position[2];
+                double xpp = -detectorDouble[17] * x + detectorDouble[16] * y;
+                double ypp = -detectorDouble[16] * detectorDouble[14] * x
+                             - detectorDouble[17] * detectorDouble[14] * y + detectorDouble[15] * z;
+                if (xpp * xpp + ypp * ypp > radiusSquared) return;
+            }
+
+            int lo = 0;
+            int hi = sedBinCount;
+            while (lo < hi)
+            {
+                int mid = lo + (hi - lo) / 2;
+                if (sedBorderPairv[2 * (sedBinBegin + mid)] <= lambdaObserved)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            int localBin = lo - 1;
+            if (localBin >= 0
+                && lambdaObserved < sedBorderPairv[2 * (sedBinBegin + localBin) + 1]
+                && localBin < detectorInt[8])
+            {
+                double* sedAccumulator = reinterpret_cast<double*>(sedAddress);
+                skirt_atomic_add_double(sedAccumulator + localBin, luminosity);
+            }
         }
-        int localBin = lo - 1;
-        if (localBin >= 0
-            && lambdaObserved < sedBorderPairv[2 * (sedBinBegin + localBin) + 1]
-            && localBin < detectorInt[8])
+    }
+}
+
+struct SkirtPreparedDetectorSlot
+{
+    int framePixel;
+    int firstLocalBand;
+    double firstTransmission;
+    double lambdaObservedFrame;
+    int sedLocalBin;
+};
+
+static __device__ bool skirt_detector_prepare_slot(
+    double lambda, const double* positionv, int packetBase, const double* detectorDouble, const int* detectorInt,
+    const unsigned long long* address, const int* bandOffsetv, const double* bandWavelengthv,
+    const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv,
+    SkirtPreparedDetectorSlot* prepared)
+{
+    prepared->framePixel = -1;
+    prepared->firstLocalBand = 0;
+    prepared->firstTransmission = 0.0;
+    prepared->lambdaObservedFrame = 0.0;
+    prepared->sedLocalBin = -1;
+
+    bool posLoaded = false;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+
+    unsigned long long frameAddress = address[0];
+    int rawBandCount = detectorInt[4];
+    int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
+    if (frameAddress && frameBandCount > 0)
+    {
+        double observed = lambda * (1.0 + detectorDouble[13]);
+        int frameBandBegin = detectorInt[3];
+        if (rawBandCount >= 0
+            || (observed > bandWavelengthv[bandOffsetv[frameBandBegin]]
+                && observed < bandWavelengthv[bandOffsetv[frameBandBegin + frameBandCount] - 1]))
         {
-            double* sedAccumulator = reinterpret_cast<double*>(sedAddress);
-            skirt_atomic_add_double(sedAccumulator + localBin, luminosity);
+            x = positionv[packetBase];
+            y = positionv[packetBase + 1];
+            z = positionv[packetBase + 2];
+            posLoaded = true;
+            double xpp = -detectorDouble[6] * x + detectorDouble[5] * y;
+            double ypp = -detectorDouble[5] * detectorDouble[3] * x
+                         - detectorDouble[6] * detectorDouble[3] * y + detectorDouble[4] * z;
+            double xp = detectorDouble[7] * xpp - detectorDouble[8] * ypp;
+            double yp = detectorDouble[8] * xpp + detectorDouble[7] * ypp;
+            int i = static_cast<int>(floor((xp - detectorDouble[9]) / detectorDouble[10]));
+            int j = static_cast<int>(floor((yp - detectorDouble[11]) / detectorDouble[12]));
+            if (i >= 0 && i < detectorInt[0] && j >= 0 && j < detectorInt[1])
+            {
+                int firstLocalBand = rawBandCount < 0
+                                         ? skirt_frame_band_first_candidate(
+                                               bandOffsetv, bandWavelengthv, frameBandBegin, frameBandCount, observed)
+                                         : 0;
+                for (int localBand = firstLocalBand; localBand != frameBandCount; ++localBand)
+                {
+                    int band = frameBandBegin + localBand;
+                    int begin = bandOffsetv[band];
+                    if (rawBandCount < 0 && bandWavelengthv[begin] >= observed) break;
+                    double transmission = skirt_band_relative_transmission(
+                        bandWavelengthv, bandTransmissionv, begin, bandOffsetv[band + 1], bandWidthv[band], observed);
+                    if (transmission > 0.0)
+                    {
+                        prepared->framePixel = i + detectorInt[0] * j;
+                        prepared->firstLocalBand = localBand;
+                        prepared->firstTransmission = transmission;
+                        prepared->lambdaObservedFrame = observed;
+                        break;
+                    }
+                }
+            }
         }
+    }
+
+    unsigned long long sedAddress = address[1];
+    int sedBinCount = detectorInt[7];
+    if (sedAddress && sedBinCount > 0)
+    {
+        double observed = lambda * (1.0 + detectorDouble[19]);
+        int sedBinBegin = detectorInt[6];
+        if (observed >= sedBorderPairv[2 * sedBinBegin]
+            && observed < sedBorderPairv[2 * (sedBinBegin + sedBinCount - 1) + 1])
+        {
+            bool insideAperture = true;
+            double radiusSquared = detectorDouble[18];
+            if (radiusSquared > 0.0)
+            {
+                if (!posLoaded)
+                {
+                    x = positionv[packetBase];
+                    y = positionv[packetBase + 1];
+                    z = positionv[packetBase + 2];
+                }
+                double xpp = -detectorDouble[17] * x + detectorDouble[16] * y;
+                double ypp = -detectorDouble[16] * detectorDouble[14] * x
+                             - detectorDouble[17] * detectorDouble[14] * y + detectorDouble[15] * z;
+                if (xpp * xpp + ypp * ypp > radiusSquared) insideAperture = false;
+            }
+            if (insideAperture)
+            {
+                int lo = 0;
+                int hi = sedBinCount;
+                while (lo < hi)
+                {
+                    int mid = lo + (hi - lo) / 2;
+                    if (sedBorderPairv[2 * (sedBinBegin + mid)] <= observed)
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+                int localBin = lo - 1;
+                if (localBin >= 0 && observed < sedBorderPairv[2 * (sedBinBegin + localBin) + 1]
+                    && localBin < detectorInt[8])
+                {
+                    prepared->sedLocalBin = localBin;
+                }
+            }
+        }
+    }
+
+    return prepared->framePixel >= 0 || prepared->sedLocalBin >= 0;
+}
+
+static __device__ void skirt_detector_accumulate_prepared_slot(
+    const SkirtPreparedDetectorSlot* prepared, const int* detectorInt, const unsigned long long* address,
+    double luminosity, const int* bandOffsetv, const double* bandWavelengthv,
+    const double* bandTransmissionv, const double* bandWidthv)
+{
+    if (prepared->framePixel >= 0)
+    {
+        double* frameAccumulator = reinterpret_cast<double*>(address[0]);
+        int rawBandCount = detectorInt[4];
+        int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
+        int frameBandBegin = detectorInt[3];
+        int firstKey = prepared->framePixel + prepared->firstLocalBand * detectorInt[2];
+        if (firstKey >= 0 && firstKey < detectorInt[5])
+            skirt_atomic_add_double(frameAccumulator + firstKey, luminosity * prepared->firstTransmission);
+        double lambdaObserved = prepared->lambdaObservedFrame;
+        for (int localBand = prepared->firstLocalBand + 1; localBand != frameBandCount; ++localBand)
+        {
+            int band = frameBandBegin + localBand;
+            int begin = bandOffsetv[band];
+            if (rawBandCount < 0 && bandWavelengthv[begin] >= lambdaObserved) break;
+            double transmission = skirt_band_relative_transmission(
+                bandWavelengthv, bandTransmissionv, begin, bandOffsetv[band + 1],
+                bandWidthv[band], lambdaObserved);
+            if (transmission == 0.0) continue;
+            int key = prepared->framePixel + localBand * detectorInt[2];
+            if (key >= 0 && key < detectorInt[5])
+                skirt_atomic_add_double(frameAccumulator + key, luminosity * transmission);
+        }
+    }
+    if (prepared->sedLocalBin >= 0)
+    {
+        double* sedAccumulator = reinterpret_cast<double*>(address[1]);
+        skirt_atomic_add_double(sedAccumulator + prepared->sedLocalBin, luminosity);
     }
 }
 
@@ -5359,7 +6101,8 @@ extern "C" __global__ void voronoi_table_emission_detector_accumulate_mixed(
     const double* lambdav, const unsigned int* lookupPairv,
     const double* emissionVelocityv, const double* lookupWavelengthv, int lookupCount,
     const int* bandOffsetv, const double* bandWavelengthv,
-    const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv, int* statusv)
+    const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv,
+    const float* detectorTauVolumev, int* statusv)
 {
     constexpr int detectorDoubleStride = 20;
     constexpr int detectorIntStride = 10;
@@ -5413,14 +6156,21 @@ extern "C" __global__ void voronoi_table_emission_detector_accumulate_mixed(
         tableIndex = skirt_section_lookup_index(lookupWavelengthv, lookupBegin, lookupCount, lambda);
     }
     if (!sampleObserver && detectorInt[9] < 0) return;
-    bool accepted = false;
-    for (int slot = observerIndex; !accepted && slot >= 0;
+    SkirtPreparedDetectorSlot prepared;
+    int acceptedSlot = -1;
+    for (int slot = observerIndex; slot >= 0;
          slot = sampleObserver ? -1 : skirt_detector_chain_next(detectorIntv, slot))
-        accepted = skirt_detector_accepts_wavelength(lambda, detectorDoublev + detectorDoubleStride * slot,
-                                                     detectorIntv + detectorIntStride * slot,
-                                                     accumulatorAddressv + 2 * slot, bandOffsetv, bandWavelengthv,
-                                                     bandTransmissionv, bandWidthv, sedBorderPairv);
-    if (!accepted) return;
+    {
+        if (skirt_detector_prepare_slot(lambda, positionv, packetBase, detectorDoublev + detectorDoubleStride * slot,
+                                        detectorIntv + detectorIntStride * slot, accumulatorAddressv + 2 * slot,
+                                        bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv, sedBorderPairv,
+                                        &prepared))
+        {
+            acceptedSlot = slot;
+            break;
+        }
+    }
+    if (acceptedSlot < 0) return;
     float sectionExtScaled = static_cast<float>(sectionTablev[tableIndex] / static_cast<double>(coordinateScale));
     int initialCell = startCellv ? startCellv[packetIndex] : -1;
     int localStatus = 1;
@@ -5434,7 +6184,7 @@ extern "C" __global__ void voronoi_table_emission_detector_accumulate_mixed(
         coordinateScale, positionv, packetBase, static_cast<float>(detectorDouble[0]),
         static_cast<float>(detectorDouble[1]), static_cast<float>(detectorDouble[2]),
         maxDistancev ? maxDistancev[packetIndex] : 1.0 / 0.0,
-        densityv, sectionExtScaled, initialCell, &localStatus);
+        densityv, sectionExtScaled, initialCell, detectorTauVolumev, observerIndex, &localStatus);
     if (localStatus != 1)
     {
         atomicExch(statusv, 0);
@@ -5445,13 +6195,19 @@ extern "C" __global__ void voronoi_table_emission_detector_accumulate_mixed(
     double luminosity = packetLuminosity * static_cast<double>(expf(-tau)) * observerWeight;
     if (luminosity == 0.0) return;
 
-    // accumulate into this slot and every same-direction slot chained to it
-    double position[3] = {positionv[packetBase], positionv[packetBase + 1], positionv[packetBase + 2]};
-    for (int slot = observerIndex; slot >= 0; slot = sampleObserver ? -1 : skirt_detector_chain_next(detectorIntv, slot))
-        skirt_detector_accumulate_slot(detectorDoublev + detectorDoubleStride * slot,
-                                       detectorIntv + detectorIntStride * slot, accumulatorAddressv + 2 * slot, position,
-                                       lambda, luminosity, bandOffsetv, bandWavelengthv, bandTransmissionv,
-                                       bandWidthv, sedBorderPairv);
+    skirt_detector_accumulate_prepared_slot(&prepared, detectorIntv + detectorIntStride * acceptedSlot,
+                                            accumulatorAddressv + 2 * acceptedSlot, luminosity, bandOffsetv,
+                                            bandWavelengthv, bandTransmissionv, bandWidthv);
+    int nextSlot = sampleObserver ? -1 : skirt_detector_chain_next(detectorIntv, acceptedSlot);
+    if (nextSlot >= 0)
+    {
+        double position[3] = {positionv[packetBase], positionv[packetBase + 1], positionv[packetBase + 2]};
+        for (int slot = nextSlot; slot >= 0; slot = skirt_detector_chain_next(detectorIntv, slot))
+            skirt_detector_accumulate_slot(detectorDoublev + detectorDoubleStride * slot,
+                                           detectorIntv + detectorIntStride * slot, accumulatorAddressv + 2 * slot,
+                                           position, lambda, luminosity, bandOffsetv, bandWavelengthv,
+                                           bandTransmissionv, bandWidthv, sedBorderPairv);
+    }
 }
 
 extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate_mixed(
@@ -5470,7 +6226,8 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate_mixed
     int hgLookupBegin, int hgLookupCount,
     const double* asymmparv,
     const int* bandOffsetv, const double* bandWavelengthv,
-    const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv, int* statusv)
+    const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv,
+    const float* detectorTauVolumev, int* statusv)
 {
     constexpr int detectorDoubleStride = 20;
     constexpr int detectorIntStride = 10;
@@ -5508,14 +6265,21 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate_mixed
 
     double lambda = lambdav[packetIndex];
     if (!sampleObserver && detectorInt[9] < 0) return;
-    bool accepted = false;
-    for (int slot = observerIndex; !accepted && slot >= 0;
+    SkirtPreparedDetectorSlot prepared;
+    int acceptedSlot = -1;
+    for (int slot = observerIndex; slot >= 0;
          slot = sampleObserver ? -1 : skirt_detector_chain_next(detectorIntv, slot))
-        accepted = skirt_detector_accepts_wavelength(lambda, detectorDoublev + detectorDoubleStride * slot,
-                                                     detectorIntv + detectorIntStride * slot,
-                                                     accumulatorAddressv + 2 * slot, bandOffsetv, bandWavelengthv,
-                                                     bandTransmissionv, bandWidthv, sedBorderPairv);
-    if (!accepted) return;
+    {
+        if (skirt_detector_prepare_slot(lambda, positionv, packetBase, detectorDoublev + detectorDoubleStride * slot,
+                                        detectorIntv + detectorIntStride * slot, accumulatorAddressv + 2 * slot,
+                                        bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv, sedBorderPairv,
+                                        &prepared))
+        {
+            acceptedSlot = slot;
+            break;
+        }
+    }
+    if (acceptedSlot < 0) return;
     int tableIndex = lookupBegin + static_cast<int>(lookupPairv[packetIndex] & 0xffffU);
     float sectionExtScaled = static_cast<float>(sectionTablev[tableIndex] / static_cast<double>(coordinateScale));
     int initialCell = startCellv ? startCellv[packetIndex] : -1;
@@ -5532,7 +6296,7 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate_mixed
         xminPhysical, yminPhysical, zminPhysical,
         coordinateScale, positionv, packetBase, obsx, obsy, obsz,
         maxDistancev ? maxDistancev[packetIndex] : 1.0 / 0.0, densityv,
-        sectionExtScaled, initialCell, &localStatus);
+        sectionExtScaled, initialCell, detectorTauVolumev, observerIndex, &localStatus);
     if (localStatus != 1)
     {
         atomicExch(statusv, 0);
@@ -5544,18 +6308,27 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate_mixed
     double scatteringCostheta = inputDirectionv[packetBase] * detectorDouble[0]
                                 + inputDirectionv[packetBase + 1] * detectorDouble[1]
                                 + inputDirectionv[packetBase + 2] * detectorDouble[2];
-    double phase = fabs(g) > 0.95 ? skirt_hg_mean(g, scatteringCostheta) : skirt_hg_value(g, scatteringCostheta);
+    double phase = fabs(g) > 0.95
+                       ? skirt_hg_mean(g, scatteringCostheta)
+                       : static_cast<double>(
+                             skirt_hg_value_float(static_cast<float>(g), static_cast<float>(scatteringCostheta)));
     double observerWeight = sampleObserver ? static_cast<double>(numObservers) : 1.0;
     double luminosity = packetLuminosity * phase * static_cast<double>(expf(-tau)) * observerWeight;
     if (luminosity == 0.0) return;
 
-    // accumulate into this slot and every same-direction slot chained to it
-    double position[3] = {positionv[packetBase], positionv[packetBase + 1], positionv[packetBase + 2]};
-    for (int slot = observerIndex; slot >= 0; slot = sampleObserver ? -1 : skirt_detector_chain_next(detectorIntv, slot))
-        skirt_detector_accumulate_slot(detectorDoublev + detectorDoubleStride * slot,
-                                       detectorIntv + detectorIntStride * slot, accumulatorAddressv + 2 * slot, position,
-                                       lambda, luminosity, bandOffsetv, bandWavelengthv, bandTransmissionv,
-                                       bandWidthv, sedBorderPairv);
+    skirt_detector_accumulate_prepared_slot(&prepared, detectorIntv + detectorIntStride * acceptedSlot,
+                                            accumulatorAddressv + 2 * acceptedSlot, luminosity, bandOffsetv,
+                                            bandWavelengthv, bandTransmissionv, bandWidthv);
+    int nextSlot = sampleObserver ? -1 : skirt_detector_chain_next(detectorIntv, acceptedSlot);
+    if (nextSlot >= 0)
+    {
+        double position[3] = {positionv[packetBase], positionv[packetBase + 1], positionv[packetBase + 2]};
+        for (int slot = nextSlot; slot >= 0; slot = skirt_detector_chain_next(detectorIntv, slot))
+            skirt_detector_accumulate_slot(detectorDoublev + detectorDoubleStride * slot,
+                                           detectorIntv + detectorIntStride * slot, accumulatorAddressv + 2 * slot,
+                                           position, lambda, luminosity, bandOffsetv, bandWavelengthv,
+                                           bandTransmissionv, bandWidthv, sedBorderPairv);
+    }
 }
 
 #if 0
@@ -5943,77 +6716,10 @@ extern "C" __global__ void voronoi_table_hg_scattering_detector_accumulate_warp(
     double luminosity = packetLuminosity * phase * exp(-tau);
     if (luminosity == 0.0) return;
 
-    unsigned long long frameAddress = accumulatorAddressv[2 * observerIndex];
-    int frameBandCount = detectorInt[4];
-    if (frameAddress && frameBandCount > 0)
-    {
-        double x = positionv[packetBase];
-        double y = positionv[packetBase + 1];
-        double z = positionv[packetBase + 2];
-        double xpp = -detectorDouble[6] * x + detectorDouble[5] * y;
-        double ypp = -detectorDouble[5] * detectorDouble[3] * x
-                     - detectorDouble[6] * detectorDouble[3] * y + detectorDouble[4] * z;
-        double xp = detectorDouble[7] * xpp - detectorDouble[8] * ypp;
-        double yp = detectorDouble[8] * xpp + detectorDouble[7] * ypp;
-        int i = static_cast<int>(floor((xp - detectorDouble[9]) / detectorDouble[10]));
-        int j = static_cast<int>(floor((yp - detectorDouble[11]) / detectorDouble[12]));
-        if (i >= 0 && i < detectorInt[0] && j >= 0 && j < detectorInt[1])
-        {
-            double* frameAccumulator = reinterpret_cast<double*>(frameAddress);
-            int pixel = i + detectorInt[0] * j;
-            double lambdaObserved = lambda * (1.0 + detectorDouble[13]);
-            int frameBandBegin = detectorInt[3];
-            for (int localBand = 0; localBand != frameBandCount; ++localBand)
-            {
-                int band = frameBandBegin + localBand;
-                double transmission = skirt_band_relative_transmission(
-                    bandWavelengthv, bandTransmissionv, bandOffsetv[band], bandOffsetv[band + 1],
-                    bandWidthv[band], lambdaObserved);
-                if (transmission == 0.0) continue;
-                int key = pixel + localBand * detectorInt[2];
-                if (key >= 0 && key < detectorInt[5])
-                    skirt_atomic_add_double(frameAccumulator + key, luminosity * transmission);
-            }
-        }
-    }
-
-    unsigned long long sedAddress = accumulatorAddressv[2 * observerIndex + 1];
-    int sedBinCount = detectorInt[7];
-    if (sedAddress && sedBinCount > 0)
-    {
-        double radiusSquared = detectorDouble[18];
-        if (radiusSquared > 0.0)
-        {
-            double x = positionv[packetBase];
-            double y = positionv[packetBase + 1];
-            double z = positionv[packetBase + 2];
-            double xpp = -detectorDouble[17] * x + detectorDouble[16] * y;
-            double ypp = -detectorDouble[16] * detectorDouble[14] * x
-                         - detectorDouble[17] * detectorDouble[14] * y + detectorDouble[15] * z;
-            if (xpp * xpp + ypp * ypp > radiusSquared) return;
-        }
-
-        double lambdaObserved = lambda * (1.0 + detectorDouble[19]);
-        int sedBinBegin = detectorInt[6];
-        int lo = 0;
-        int hi = sedBinCount;
-        while (lo < hi)
-        {
-            int mid = lo + (hi - lo) / 2;
-            if (sedBorderPairv[2 * (sedBinBegin + mid)] <= lambdaObserved)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-        int localBin = lo - 1;
-        if (localBin >= 0
-            && lambdaObserved < sedBorderPairv[2 * (sedBinBegin + localBin) + 1]
-            && localBin < detectorInt[8])
-        {
-            double* sedAccumulator = reinterpret_cast<double*>(sedAddress);
-            skirt_atomic_add_double(sedAccumulator + localBin, luminosity);
-        }
-    }
+    double position[3] = {positionv[packetBase], positionv[packetBase + 1], positionv[packetBase + 2]};
+    skirt_detector_accumulate_slot(detectorDouble, detectorInt, accumulatorAddressv + 2 * observerIndex, position,
+                                   lambda, luminosity, bandOffsetv, bandWavelengthv, bandTransmissionv, bandWidthv,
+                                   sedBorderPairv);
 }
 
 extern "C" __global__ void voronoi_table_hg_scattering_frame_band_accumulate(
@@ -6403,7 +7109,7 @@ extern "C" __global__ void lifecycle_voronoi_analog_step_mixed(
     double packetLuminosity = luminosityv[packet];
     unsigned long long rngState = rngStatev[packet];
     double randomSelect = skirt_lifecycle_uniform(&rngState);
-    skirt_lifecycle_uniform(&rngState);
+    double randomRr = skirt_lifecycle_uniform(&rngState);
     randomCosthetav[packet] = skirt_lifecycle_uniform(&rngState);
     randomPhiv[packet] = skirt_lifecycle_uniform(&rngState);
     rngStatev[packet] = rngState;
@@ -6433,9 +7139,10 @@ extern "C" __global__ void lifecycle_voronoi_analog_step_mixed(
     }
     if (numRadiationFieldValues == 0 && blockMaxDensityv)
     {
+        float requiredColumn = sectionExtScaled > 0.0f ? tauInteract / sectionExtScaled : 3.402823466e+38F;
         float columnBound = skirt_block_column_density_upper_bound(
             blockMaxDensityv, columnBlockN, eps, rx, ry, rz, kx, ky, kz,
-            xmax, ymax, zmax, maxDensity);
+            xmax, ymax, zmax, maxDensity, requiredColumn);
         if (!(tauInteract < sectionExtScaled * columnBound))
         {
             luminosityv[packet] = 0.0;
@@ -6455,12 +7162,13 @@ extern "C" __global__ void lifecycle_voronoi_analog_step_mixed(
     {
         int cell = -1;
         float ds = 0.0f;
+        int voronoiStep = 0;
         while (skirt_voronoi_ray_next_plane_float(
             sitev, neighborBeginv, neighborCountv, neighborIndexv, neighborPlanev,
             blockBeginv, blockCountv, blockIndexv,
             blockN, numCells, eps, xmax, ymax, zmax, &ray, &cell, &ds, &localStatus))
         {
-            float deltaTau = sectionExtScaled * densityv[cell] * ds;
+            float deltaTau = sectionExtScaled * __ldg(&densityv[cell]) * ds;
             float traveledDs = ds;
             if (deltaTau > 0.0f && tauInteract < cumulativeTau + deltaTau)
             {
@@ -6468,7 +7176,7 @@ extern "C" __global__ void lifecycle_voronoi_analog_step_mixed(
                 interactionDistance = ray.distance - ds + traveledDs;
                 interactionCell = cell;
             }
-            if (ell >= 0 && ell < numWavelengths)
+            if (numRadiationFieldValues > 0 && ell >= 0 && ell < numWavelengths)
             {
                 int key = cell * numWavelengths + ell;
                 if (key >= 0 && key < numRadiationFieldValues)
@@ -6480,6 +7188,15 @@ extern "C" __global__ void lifecycle_voronoi_analog_step_mixed(
             }
             if (interactionCell >= 0) break;
             cumulativeTau += deltaTau;
+            if (numRadiationFieldValues == 0 && blockMaxDensityv && ((++voronoiStep & 15) == 8))
+            {
+                float remTau = tauInteract - cumulativeTau;
+                float remColumnBound = skirt_block_column_density_upper_bound(
+                    blockMaxDensityv, columnBlockN, eps, ray.rx, ray.ry, ray.rz, kx, ky, kz,
+                    xmax, ymax, zmax, maxDensity, remTau / sectionExtScaled);
+                if (!(remTau < sectionExtScaled * remColumnBound))
+                    break;
+            }
         }
     }
     if (!started || localStatus != 1 || interactionCell < 0 || interactionDistance < 0.0f
@@ -6498,12 +7215,23 @@ extern "C" __global__ void lifecycle_voronoi_analog_step_mixed(
     positionv[base + 2] += directionv[base + 2] * distancePhysical;
     double albedo = sectionExt > 0.0 ? sectionSca / sectionExt : 0.0;
     double luminosity = packetLuminosity * albedo;
-    if (!isfinite(luminosity) || luminosity <= 0.0
-        || (luminosity <= thresholdv[packet]
-            && (minScattEvents == 0 || numScattv[packet] >= minScattEvents)))
+    double threshold = thresholdv[packet];
+    bool canTerminate = (minScattEvents == 0 || numScattv[packet] >= minScattEvents);
+    if (!isfinite(luminosity) || luminosity <= 0.0 || (canTerminate && luminosity <= threshold))
     {
         luminosity = 0.0;
         interactionCell = -1;
+    }
+    else if (canTerminate && threshold > 0.0 && luminosity < 8.0 * threshold)
+    {
+        double rrTarget = 8.0 * threshold;
+        if (randomRr * rrTarget < luminosity)
+            luminosity = rrTarget;
+        else
+        {
+            luminosity = 0.0;
+            interactionCell = -1;
+        }
     }
     luminosityv[packet] = luminosity;
     cellInOutv[packet] = interactionCell;
@@ -6541,7 +7269,7 @@ extern "C" __global__ void lifecycle_voronoi_analog_rf_step_mixed(
     double packetLuminosity = luminosityv[packet];
     unsigned long long rngState = rngStatev[packet];
     double randomSelect = skirt_lifecycle_uniform(&rngState);
-    skirt_lifecycle_uniform(&rngState);
+    double randomRr = skirt_lifecycle_uniform(&rngState);
     randomCosthetav[packet] = skirt_lifecycle_uniform(&rngState);
     randomPhiv[packet] = skirt_lifecycle_uniform(&rngState);
     rngStatev[packet] = rngState;
@@ -6603,12 +7331,23 @@ extern "C" __global__ void lifecycle_voronoi_analog_rf_step_mixed(
     positionv[base + 2] += directionv[base + 2] * distancePhysical;
     double albedo = sectionExt > 0.0 ? sectionSca / sectionExt : 0.0;
     double luminosity = packetLuminosity * albedo;
-    if (!isfinite(luminosity) || luminosity <= 0.0
-        || (luminosity <= thresholdv[packet]
-            && (minScattEvents == 0 || numScattv[packet] >= minScattEvents)))
+    double threshold = thresholdv[packet];
+    bool canTerminate = (minScattEvents == 0 || numScattv[packet] >= minScattEvents);
+    if (!isfinite(luminosity) || luminosity <= 0.0 || (canTerminate && luminosity <= threshold))
     {
         luminosity = 0.0;
         interactionCell = -1;
+    }
+    else if (canTerminate && threshold > 0.0 && luminosity < 8.0 * threshold)
+    {
+        double rrTarget = 8.0 * threshold;
+        if (randomRr * rrTarget < luminosity)
+            luminosity = rrTarget;
+        else
+        {
+            luminosity = 0.0;
+            interactionCell = -1;
+        }
     }
     luminosityv[packet] = luminosity;
     cellInOutv[packet] = interactionCell;
@@ -6726,6 +7465,11 @@ extern "C" __global__ void lifecycle_voronoi_forced_step_mixed(
         sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN, eps, rx, ry, rz, kx, ky, kz,
         xmax, ymax, zmax, initialCell, &ray);
     int firstCell = started ? ray.cell : -1;
+    constexpr int maxCachedSegments = 64;
+    int cachedCell[maxCachedSegments];
+    float cachedDs[maxCachedSegments];
+    int numPass1Segments = 0;
+    bool computeRf = (ell >= 0 && ell < numWavelengths && numRadiationFieldValues > 0 && radiationFieldAccumulator != nullptr);
     if (started)
     {
         int cell = -1;
@@ -6735,9 +7479,15 @@ extern "C" __global__ void lifecycle_voronoi_forced_step_mixed(
             blockBeginv, blockCountv, blockIndexv,
             blockN, numCells, eps, xmax, ymax, zmax, &ray, &cell, &ds, &localStatus))
         {
+            if (numPass1Segments < maxCachedSegments)
+            {
+                cachedCell[numPass1Segments] = cell;
+                cachedDs[numPass1Segments] = ds;
+            }
+            ++numPass1Segments;
             float tauBegin = tauPath;
             tauPath += sectionExtScaled * densityv[cell] * ds;
-            if (ell >= 0 && ell < numWavelengths)
+            if (computeRf)
             {
                 int key = cell * numWavelengths + ell;
                 if (key >= 0 && key < numRadiationFieldValues)
@@ -6792,30 +7542,56 @@ extern "C" __global__ void lifecycle_voronoi_forced_step_mixed(
     int interactionCell = -1;
     float interactionDistance = 0.0f;
     float cumulativeTau = 0.0f;
-    localStatus = 1;
-    started = skirt_voronoi_ray_start_float(
-        sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN, eps, rx, ry, rz, kx, ky, kz,
-        xmax, ymax, zmax, firstCell, &ray);
-    if (started)
+    float cumDistance = 0.0f;
+    bool foundInCache = false;
+    int cachedCount = numPass1Segments < maxCachedSegments ? numPass1Segments : maxCachedSegments;
+    for (int s = 0; s != cachedCount; ++s)
     {
-        int cell = -1;
-        float ds = 0.0f;
-        while (skirt_voronoi_ray_next_plane_float(
-            sitev, neighborBeginv, neighborCountv, neighborIndexv, neighborPlanev,
-            blockBeginv, blockCountv, blockIndexv,
-            blockN, numCells, eps, xmax, ymax, zmax, &ray, &cell, &ds, &localStatus))
+        int cell = cachedCell[s];
+        float ds = cachedDs[s];
+        float tauBegin = cumulativeTau;
+        cumulativeTau += sectionExtScaled * densityv[cell] * ds;
+        cumDistance += ds;
+        interactionCell = cell;
+        interactionDistance = cumDistance;
+        if (tauInteract < cumulativeTau)
         {
-            float tauBegin = cumulativeTau;
-            cumulativeTau += sectionExtScaled * densityv[cell] * ds;
-            interactionCell = cell;
-            interactionDistance = ray.distance;
-            if (tauInteract < cumulativeTau)
+            float fraction = cumulativeTau != tauBegin
+                                 ? (tauInteract - tauBegin) / (cumulativeTau - tauBegin)
+                                 : 0.0f;
+            interactionDistance = cumDistance - ds + fraction * ds;
+            foundInCache = true;
+            break;
+        }
+    }
+    if (!foundInCache && numPass1Segments > maxCachedSegments)
+    {
+        cumulativeTau = 0.0f;
+        localStatus = 1;
+        started = skirt_voronoi_ray_start_float(
+            sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN, eps, rx, ry, rz, kx, ky, kz,
+            xmax, ymax, zmax, firstCell, &ray);
+        if (started)
+        {
+            int cell = -1;
+            float ds = 0.0f;
+            while (skirt_voronoi_ray_next_plane_float(
+                sitev, neighborBeginv, neighborCountv, neighborIndexv, neighborPlanev,
+                blockBeginv, blockCountv, blockIndexv,
+                blockN, numCells, eps, xmax, ymax, zmax, &ray, &cell, &ds, &localStatus))
             {
-                float fraction = cumulativeTau != tauBegin
-                                     ? (tauInteract - tauBegin) / (cumulativeTau - tauBegin)
-                                     : 0.0f;
-                interactionDistance = ray.distance - ds + fraction * ds;
-                break;
+                float tauBegin = cumulativeTau;
+                cumulativeTau += sectionExtScaled * densityv[cell] * ds;
+                interactionCell = cell;
+                interactionDistance = ray.distance;
+                if (tauInteract < cumulativeTau)
+                {
+                    float fraction = cumulativeTau != tauBegin
+                                         ? (tauInteract - tauBegin) / (cumulativeTau - tauBegin)
+                                         : 0.0f;
+                    interactionDistance = ray.distance - ds + fraction * ds;
+                    break;
+                }
             }
         }
     }
@@ -7500,9 +8276,28 @@ static __device__ SkirtImportedSourcePacket skirt_sample_imported_particle_sourc
     double mixtureRandom = skirt_lifecycle_uniform(&state);
     double spectralRandom = skirt_lifecycle_uniform(&state);
     double lambda = wavelengthv[0];
+    double spectralWeight = 1.0;
     if (wavelengthBias > 0.0 && mixtureRandom <= wavelengthBias)
     {
         lambda = exp(biasLogMin + biasLogWidth * spectralRandom);
+        int wavelengthRight = skirt_lower_bound_double(wavelengthv, numWavelengths, lambda);
+        if (wavelengthRight < 1) wavelengthRight = 1;
+        if (wavelengthRight >= numWavelengths) wavelengthRight = numWavelengths - 1;
+        int wavelengthLeft = wavelengthRight - 1;
+        double x0 = wavelengthv[wavelengthLeft];
+        double x1 = wavelengthv[wavelengthRight];
+        double p0 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + wavelengthLeft);
+        double p1 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + wavelengthRight);
+        double specificLuminosity = 0.0;
+        if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
+        {
+            double alpha = log(p1 / p0) / log(x1 / x0);
+            specificLuminosity = p0 * pow(lambda / x0, alpha);
+        }
+        double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
+        double combined = (1.0 - wavelengthBias) * specificLuminosity
+                          + wavelengthBias * biasProbability;
+        spectralWeight = specificLuminosity > 0.0 && combined > 0.0 ? specificLuminosity / combined : 0.0;
     }
     else
     {
@@ -7518,29 +8313,28 @@ static __device__ SkirtImportedSourcePacket skirt_sample_imported_particle_sourc
         double alpha = p0 > 0.0 && p1 > 0.0 ? log(p1 / p0) / log(x1 / x0) : 0.0;
         lambda = p0 > 0.0 ? x0 * skirt_gexp(-alpha, (spectralRandom - c0) / (p0 * x0)) : x0;
         if (!(lambda >= x0 && lambda <= x1)) lambda = x0;
-    }
-
-    int wavelengthRight = skirt_lower_bound_double(wavelengthv, numWavelengths, lambda);
-    if (wavelengthRight < 1) wavelengthRight = 1;
-    if (wavelengthRight >= numWavelengths) wavelengthRight = numWavelengths - 1;
-    int wavelengthLeft = wavelengthRight - 1;
-    double x0 = wavelengthv[wavelengthLeft];
-    double x1 = wavelengthv[wavelengthRight];
-    double p0 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + wavelengthLeft);
-    double p1 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + wavelengthRight);
-    double specificLuminosity = 0.0;
-    if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
-    {
-        double alpha = log(p1 / p0) / log(x1 / x0);
-        specificLuminosity = p0 * pow(lambda / x0, alpha);
-    }
-    double spectralWeight = 1.0;
-    if (wavelengthBias > 0.0)
-    {
-        double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
-        double combined = (1.0 - wavelengthBias) * specificLuminosity
-                          + wavelengthBias * biasProbability;
-        spectralWeight = specificLuminosity > 0.0 && combined > 0.0 ? specificLuminosity / combined : 0.0;
+        if (wavelengthBias > 0.0)
+        {
+            double specificLuminosity = 0.0;
+            if (lambda == x0 && left > 0)
+            {
+                double prevX0 = wavelengthv[left - 1];
+                double prevP0 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + left - 1);
+                if (prevP0 > 0.0 && p0 > 0.0 && prevX0 > 0.0 && x0 > prevX0)
+                {
+                    double prevAlpha = log(p0 / prevP0) / log(x0 / prevX0);
+                    specificLuminosity = prevP0 * pow(lambda / prevX0, prevAlpha);
+                }
+            }
+            else if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
+            {
+                specificLuminosity = p0 * pow(lambda / x0, alpha);
+            }
+            double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
+            double combined = (1.0 - wavelengthBias) * specificLuminosity
+                              + wavelengthBias * biasProbability;
+            spectralWeight = specificLuminosity > 0.0 && combined > 0.0 ? specificLuminosity / combined : 0.0;
+        }
     }
 
     double radialRandom = skirt_lifecycle_uniform(&state);
@@ -7590,6 +8384,24 @@ extern "C" __global__ void imported_particle_source_launch(
     packetData[output + 7] = packet.luminosity;
 }
 
+extern "C" __global__ void imported_particle_source_prepare_hint_cells(
+    const double* particleCenterSizev, int numEntities,
+    const float* sitev, int numCells, const int* neighborBeginv, const int* neighborCountv,
+    const int* neighborIndexv, const int* blockBeginv, const int* blockCountv,
+    const int* blockIndexv, int blockN, float xmax, float ymax, float zmax,
+    double xminPhysical, double yminPhysical, double zminPhysical, float coordinateScale,
+    int* entityHintCellv)
+{
+    int entity = blockIdx.x * blockDim.x + threadIdx.x;
+    if (entity >= numEntities) return;
+    float rx = static_cast<float>((particleCenterSizev[4 * entity] - xminPhysical) * coordinateScale);
+    float ry = static_cast<float>((particleCenterSizev[4 * entity + 1] - yminPhysical) * coordinateScale);
+    float rz = static_cast<float>((particleCenterSizev[4 * entity + 2] - zminPhysical) * coordinateScale);
+    entityHintCellv[entity] = skirt_voronoi_find_cell_walk_float(
+        sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv,
+        blockBeginv, blockCountv, blockIndexv, blockN, rx, ry, rz, xmax, ymax, zmax, -1);
+}
+
 extern "C" __global__ void imported_particle_source_lifecycle_initialize(
     const unsigned long long* historyBeginv, const double* luminosityWeightv,
     const double* particleCenterSizev, const double* wavelengthv, const float* pdfv,
@@ -7598,43 +8410,614 @@ extern "C" __global__ void imported_particle_source_lifecycle_initialize(
     double wavelengthBias, double biasLogMin, double biasLogWidth, unsigned long long firstHistoryIndex,
     int numPackets, double luminosityPerPacket,
     double minWeightReduction, unsigned long long randomSeed, const double* radiationFieldBinBorderPairv,
-    int numRadiationFieldBins, double* positionv, double* directionv, double* luminosityv,
+    int numRadiationFieldBins, const int* entityHintCellv, int earlyWavelengthCull,
+    const double* detectorDoublev, const int* detectorIntv,
+    const unsigned long long* accumulatorAddressv, int numObservers,
+    const int* bandOffsetv, const double* bandWavelengthv, const double* bandTransmissionv,
+    const double* bandWidthv, const double* sedBorderPairv,
+    double* positionv, double* directionv, double* luminosityv,
     double* thresholdv, unsigned long long* rngStatev, int* numScattv, int* wavelengthBinv,
-    double* lambdav)
+    double* lambdav, int* cellOutv)
 {
     int packetIndex = blockIdx.x * blockDim.x + threadIdx.x;
     if (packetIndex >= numPackets) return;
 
     unsigned long long historyIndex = firstHistoryIndex + static_cast<unsigned long long>(packetIndex);
-    SkirtImportedSourcePacket packet = skirt_sample_imported_particle_source(
-        historyBeginv, luminosityWeightv, particleCenterSizev, wavelengthv, pdfv, pdfBfloat16v, cdfv,
-        numEntities, numSourceWavelengths, spectrumFirstEntity, wavelengthBias, biasLogMin, biasLogWidth, historyIndex,
-        luminosityPerPacket, randomSeed);
+    int first = 0;
+    int len = numEntities + 1;
+    while (len > 0)
+    {
+        int half = len >> 1;
+        int mid = first + half;
+        if (!(historyIndex < historyBeginv[mid]))
+        {
+            first = mid + 1;
+            len -= half + 1;
+        }
+        else
+            len = half;
+    }
+    int entity = first - 1;
+    if (entity < 0 || entity >= numEntities)
+    {
+        luminosityv[packetIndex] = 0.0;
+        if (cellOutv) cellOutv[packetIndex] = -1;
+        return;
+    }
+
+    unsigned long long state = historyIndex ^ 0xa4093822299f31d0ULL
+                               ^ (0xbf58476d1ce4e5b9ULL * (randomSeed + 1))
+                               ^ (0x9e3779b97f4a7c15ULL * static_cast<unsigned long long>(entity + 1));
+    unsigned long long entityPdfOffset =
+        static_cast<unsigned long long>(entity - spectrumFirstEntity) * numSourceWavelengths;
+    const float* entityCdf = cdfv + entityPdfOffset;
+
+    double mixtureRandom = skirt_lifecycle_uniform(&state);
+    double spectralRandom = skirt_lifecycle_uniform(&state);
+    double lambda = wavelengthv[0];
+    double spectralWeight = 1.0;
+    if (wavelengthBias > 0.0 && mixtureRandom <= wavelengthBias)
+    {
+        lambda = exp(biasLogMin + biasLogWidth * spectralRandom);
+        int wavelengthRight = skirt_lower_bound_double(wavelengthv, numSourceWavelengths, lambda);
+        if (wavelengthRight < 1) wavelengthRight = 1;
+        if (wavelengthRight >= numSourceWavelengths) wavelengthRight = numSourceWavelengths - 1;
+        int wavelengthLeft = wavelengthRight - 1;
+        double x0 = wavelengthv[wavelengthLeft];
+        double x1 = wavelengthv[wavelengthRight];
+        double p0 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + wavelengthLeft);
+        double p1 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + wavelengthRight);
+        double specificLuminosity = 0.0;
+        if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
+        {
+            double alpha = log(p1 / p0) / log(x1 / x0);
+            specificLuminosity = p0 * pow(lambda / x0, alpha);
+        }
+        double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
+        double combined = (1.0 - wavelengthBias) * specificLuminosity
+                          + wavelengthBias * biasProbability;
+        spectralWeight = specificLuminosity > 0.0 && combined > 0.0 ? specificLuminosity / combined : 0.0;
+    }
+    else
+    {
+        int right = skirt_upper_bound_float(entityCdf, numSourceWavelengths, static_cast<float>(spectralRandom));
+        if (right < 1) right = 1;
+        if (right >= numSourceWavelengths) right = numSourceWavelengths - 1;
+        int left = right - 1;
+        double x0 = wavelengthv[left];
+        double x1 = wavelengthv[right];
+        double p0 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + left);
+        double p1 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + right);
+        double c0 = static_cast<double>(entityCdf[left]);
+        double alpha = p0 > 0.0 && p1 > 0.0 ? log(p1 / p0) / log(x1 / x0) : 0.0;
+        lambda = p0 > 0.0 ? x0 * skirt_gexp(-alpha, (spectralRandom - c0) / (p0 * x0)) : x0;
+        if (!(lambda >= x0 && lambda <= x1)) lambda = x0;
+        if (wavelengthBias > 0.0)
+        {
+            double specificLuminosity = 0.0;
+            if (lambda == x0 && left > 0)
+            {
+                double prevX0 = wavelengthv[left - 1];
+                double prevP0 = skirt_imported_source_pdf_value(pdfv, pdfBfloat16v, entityPdfOffset + left - 1);
+                if (prevP0 > 0.0 && p0 > 0.0 && prevX0 > 0.0 && x0 > prevX0)
+                {
+                    double prevAlpha = log(p0 / prevP0) / log(x0 / prevX0);
+                    specificLuminosity = prevP0 * pow(lambda / prevX0, prevAlpha);
+                }
+            }
+            else if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
+            {
+                specificLuminosity = p0 * pow(lambda / x0, alpha);
+            }
+            double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
+            double combined = (1.0 - wavelengthBias) * specificLuminosity
+                              + wavelengthBias * biasProbability;
+            spectralWeight = specificLuminosity > 0.0 && combined > 0.0 ? specificLuminosity / combined : 0.0;
+        }
+    }
+
+    double packetLuminosity = luminosityPerPacket * luminosityWeightv[entity] * spectralWeight;
+    if (!(packetLuminosity > 0.0))
+    {
+        luminosityv[packetIndex] = 0.0;
+        if (cellOutv) cellOutv[packetIndex] = -1;
+        return;
+    }
+
+    if (earlyWavelengthCull)
+    {
+        bool accepted = false;
+        for (int observer = 0; observer < numObservers; ++observer)
+        {
+            if (skirt_detector_accepts_wavelength(lambda, detectorDoublev + 20 * observer,
+                                                  detectorIntv + 10 * observer,
+                                                  accumulatorAddressv + 2 * observer,
+                                                  bandOffsetv, bandWavelengthv, bandTransmissionv,
+                                                  bandWidthv, sedBorderPairv))
+            {
+                accepted = true;
+                break;
+            }
+        }
+        if (!accepted)
+        {
+            luminosityv[packetIndex] = 0.0;
+            if (cellOutv) cellOutv[packetIndex] = -1;
+            return;
+        }
+    }
+
+    double radialRandom = skirt_lifecycle_uniform(&state);
+    double positionCostheta = 2.0 * skirt_lifecycle_uniform(&state) - 1.0;
+    double positionPhi = 6.283185307179586476925286766559 * skirt_lifecycle_uniform(&state);
+    double positionSintheta = sqrt(fabs((1.0 - positionCostheta) * (1.0 + positionCostheta)));
+    double radius = skirt_sample_cubic_spline_radius(radialRandom) * particleCenterSizev[4 * entity + 3];
+
+    double launchCostheta = 2.0 * skirt_lifecycle_uniform(&state) - 1.0;
+    double launchPhi = 6.283185307179586476925286766559 * skirt_lifecycle_uniform(&state);
+    double launchSintheta = sqrt(fabs((1.0 - launchCostheta) * (1.0 + launchCostheta)));
     unsigned long long vectorOffset = 3ULL * static_cast<unsigned long long>(packetIndex);
-    positionv[vectorOffset] = packet.x;
-    positionv[vectorOffset + 1] = packet.y;
-    positionv[vectorOffset + 2] = packet.z;
-    directionv[vectorOffset] = packet.kx;
-    directionv[vectorOffset + 1] = packet.ky;
-    directionv[vectorOffset + 2] = packet.kz;
-    luminosityv[packetIndex] = packet.luminosity;
-    thresholdv[packetIndex] = packet.luminosity / minWeightReduction;
+    positionv[vectorOffset] = particleCenterSizev[4 * entity] + radius * positionSintheta * cos(positionPhi);
+    positionv[vectorOffset + 1] = particleCenterSizev[4 * entity + 1] + radius * positionSintheta * sin(positionPhi);
+    positionv[vectorOffset + 2] = particleCenterSizev[4 * entity + 2] + radius * positionCostheta;
+    directionv[vectorOffset] = launchSintheta * cos(launchPhi);
+    directionv[vectorOffset + 1] = launchSintheta * sin(launchPhi);
+    directionv[vectorOffset + 2] = launchCostheta;
+    luminosityv[packetIndex] = packetLuminosity;
+    thresholdv[packetIndex] = packetLuminosity / minWeightReduction;
     rngStatev[packetIndex] = (0xbf58476d1ce4e5b9ULL * (historyIndex + 1)) ^ randomSeed;
     if (numScattv) numScattv[packetIndex] = 0;
-    lambdav[packetIndex] = packet.lambda;
+    lambdav[packetIndex] = lambda;
+    if (cellOutv) cellOutv[packetIndex] = entityHintCellv ? entityHintCellv[entity] : -1;
 
     int wavelengthBin = -1;
     for (int ell = 0; ell < numRadiationFieldBins; ++ell)
     {
         double left = radiationFieldBinBorderPairv[2 * ell];
         double right = radiationFieldBinBorderPairv[2 * ell + 1];
-        if (packet.lambda >= left && packet.lambda < right)
+        if (lambda >= left && lambda < right)
         {
             wavelengthBin = ell;
             break;
         }
     }
     wavelengthBinv[packetIndex] = wavelengthBin;
+}
+
+static __device__ __forceinline__ double skirt_interpolate_source_cdf(
+    const double* wavelengthv, const float* entityCdf, int numSourceWavelengths, double lambda)
+{
+    if (numSourceWavelengths <= 0 || lambda <= wavelengthv[0]) return 0.0;
+    if (lambda >= wavelengthv[numSourceWavelengths - 1]) return 1.0;
+    int right = skirt_lower_bound_double(wavelengthv, numSourceWavelengths, lambda);
+    if (right <= 0) return 0.0;
+    if (right >= numSourceWavelengths) return 1.0;
+    int left = right - 1;
+    double x0 = wavelengthv[left];
+    double x1 = wavelengthv[right];
+    double c0 = static_cast<double>(entityCdf[left]);
+    double c1 = static_cast<double>(entityCdf[right]);
+    double t = x1 > x0 ? (lambda - x0) / (x1 - x0) : 0.0;
+    return c0 + t * (c1 - c0);
+}
+
+extern "C" __global__ void imported_particle_source_deterministic_direct_emission(
+    const unsigned long long* historyBeginv, const double* luminosityWeightv,
+    const double* particleCenterSizev, const double* wavelengthv, const float* cdfv,
+    const int* entityHintCellv, int numEntities, int numSourceWavelengths,
+    int spectrumFirstEntity, int numWindowEntities, int numEntitySamples,
+    unsigned long long firstHistoryIndex, int numWavePackets, double luminosityPerPacket,
+    unsigned long long randomSeed,
+    const float* sitev, const int* neighborBeginv, const int* neighborCountv, const int* neighborIndexv,
+    const SkirtPlaneValue* detectorPlanev, int numNeighborPlanes,
+    const int* blockBeginv, const int* blockCountv, const int* blockIndexv,
+    int blockN, int numCells, float eps,
+    float xmax, float ymax, float zmax, double xminPhysical, double yminPhysical, double zminPhysical,
+    float coordinateScale, const double* detectorDoublev, const int* detectorIntv,
+    const unsigned long long* accumulatorAddressv, int numObservers,
+    const float* densityv, int lookupBegin, int lookupCount, const double* lookupWavelengthv,
+    const double* sectionTablev, const int* bandOffsetv, const double* bandWavelengthv,
+    const double* bandTransmissionv, const double* bandWidthv, const double* sedBorderPairv,
+    const float* detectorTauVolumev, int* statusv)
+{
+    constexpr int detectorDoubleStride = 20;
+    constexpr int detectorIntStride = 10;
+    constexpr int maxDirectSamples = 16;
+    if (numWindowEntities <= 0 || numEntitySamples <= 0 || numObservers <= 0) return;
+    if (numEntitySamples > maxDirectSamples) numEntitySamples = maxDirectSamples;
+    int pairIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    int numPairs = numWindowEntities * numObservers;
+    if (pairIndex >= numPairs) return;
+
+    int observerIndex = pairIndex / numWindowEntities;
+    int localEntity = pairIndex - observerIndex * numWindowEntities;
+    int entity = spectrumFirstEntity + localEntity;
+    if (entity < 0 || entity >= numEntities) return;
+
+    const double* detectorDouble = detectorDoublev + detectorDoubleStride * observerIndex;
+    const int* detectorInt = detectorIntv + detectorIntStride * observerIndex;
+    if (detectorInt[9] < 0) return;
+
+    unsigned long long waveBegin = firstHistoryIndex;
+    unsigned long long waveEnd = firstHistoryIndex + static_cast<unsigned long long>(numWavePackets);
+    unsigned long long entBegin = historyBeginv[entity];
+    unsigned long long entEnd = historyBeginv[entity + 1];
+    unsigned long long h0 = entBegin > waveBegin ? entBegin : waveBegin;
+    unsigned long long h1 = entEnd < waveEnd ? entEnd : waveEnd;
+    if (h1 <= h0) return;
+
+    double entityLuminosity = static_cast<double>(h1 - h0) * luminosityPerPacket * luminosityWeightv[entity];
+    if (!(entityLuminosity > 0.0)) return;
+
+    double px = particleCenterSizev[4 * entity];
+    double py = particleCenterSizev[4 * entity + 1];
+    double pz = particleCenterSizev[4 * entity + 2];
+    double h = particleCenterSizev[4 * entity + 3];
+    int effectiveSamples = h > 0.0 ? numEntitySamples : 1;
+    double sampleLuminosity = entityLuminosity / static_cast<double>(effectiveSamples);
+
+    int hintCell = entityHintCellv ? entityHintCellv[entity] : -1;
+    double samplePos[maxDirectSamples][3];
+    float sampleColDensity[maxDirectSamples];
+    int numValidSamples = 0;
+
+    for (int sampleIndex = 0; sampleIndex < effectiveSamples; ++sampleIndex)
+    {
+        double pos[3] = {px, py, pz};
+        if (h > 0.0)
+        {
+            unsigned long long state = (h0 + static_cast<unsigned long long>(sampleIndex)) ^ 0xa4093822299f31d0ULL
+                                       ^ (0xbf58476d1ce4e5b9ULL * (randomSeed + 1))
+                                       ^ (0x9e3779b97f4a7c15ULL * static_cast<unsigned long long>(entity + 1));
+            double radialRandom = (static_cast<double>(sampleIndex) + skirt_lifecycle_uniform(&state))
+                                  / static_cast<double>(effectiveSamples);
+            double positionCostheta = 2.0 * skirt_lifecycle_uniform(&state) - 1.0;
+            double positionPhi = 6.283185307179586476925286766559 * skirt_lifecycle_uniform(&state);
+            double positionSintheta = sqrt(fabs((1.0 - positionCostheta) * (1.0 + positionCostheta)));
+            double radius = skirt_sample_cubic_spline_radius(radialRandom) * h;
+            pos[0] = px + radius * positionSintheta * cos(positionPhi);
+            pos[1] = py + radius * positionSintheta * sin(positionPhi);
+            pos[2] = pz + radius * positionCostheta;
+        }
+
+        bool anySlotSpatialHit = false;
+        for (int slot = observerIndex; slot >= 0; slot = skirt_detector_chain_next(detectorIntv, slot))
+        {
+            const double* slotDouble = detectorDoublev + detectorDoubleStride * slot;
+            const int* slotInt = detectorIntv + detectorIntStride * slot;
+            const unsigned long long* slotAddress = accumulatorAddressv + 2 * slot;
+            int rawBandCount = slotInt[4];
+            int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
+            if (slotAddress[0] && frameBandCount > 0)
+            {
+                double xpp = -slotDouble[6] * pos[0] + slotDouble[5] * pos[1];
+                double ypp = -slotDouble[5] * slotDouble[3] * pos[0]
+                             - slotDouble[6] * slotDouble[3] * pos[1] + slotDouble[4] * pos[2];
+                double xp = slotDouble[7] * xpp - slotDouble[8] * ypp;
+                double yp = slotDouble[8] * xpp + slotDouble[7] * ypp;
+                int i = static_cast<int>(floor((xp - slotDouble[9]) / slotDouble[10]));
+                int j = static_cast<int>(floor((yp - slotDouble[11]) / slotDouble[12]));
+                if (i >= 0 && i < slotInt[0] && j >= 0 && j < slotInt[1])
+                {
+                    anySlotSpatialHit = true;
+                    break;
+                }
+            }
+            if (slotAddress[1] && slotInt[7] > 0)
+            {
+                double radiusSquared = slotDouble[18];
+                if (radiusSquared <= 0.0)
+                {
+                    anySlotSpatialHit = true;
+                    break;
+                }
+                double xpp = -slotDouble[17] * pos[0] + slotDouble[16] * pos[1];
+                double ypp = -slotDouble[16] * slotDouble[14] * pos[0]
+                             - slotDouble[17] * slotDouble[14] * pos[1] + slotDouble[15] * pos[2];
+                if (xpp * xpp + ypp * ypp <= radiusSquared)
+                {
+                    anySlotSpatialHit = true;
+                    break;
+                }
+            }
+        }
+        if (!anySlotSpatialHit) continue;
+
+        float rx = static_cast<float>((pos[0] - xminPhysical) * coordinateScale);
+        float ry = static_cast<float>((pos[1] - yminPhysical) * coordinateScale);
+        float rz = static_cast<float>((pos[2] - zminPhysical) * coordinateScale);
+        int initialCell = h > 0.0
+                              ? skirt_voronoi_find_cell_walk_float(
+                                    sitev, numCells, neighborBeginv, neighborCountv, neighborIndexv,
+                                    blockBeginv, blockCountv, blockIndexv, blockN, rx, ry, rz,
+                                    xmax, ymax, zmax, hintCell)
+                              : hintCell;
+        if (initialCell >= 0) hintCell = initialCell;
+        int localStatus = 1;
+        float colDensity = skirt_voronoi_trace_total_float(
+            sitev, neighborBeginv, neighborCountv, neighborIndexv,
+            numNeighborPlanes < 0
+                ? detectorPlanev
+                : detectorPlanev + SKIRT_DETECTOR_PLANE_UNITS(numCells, numNeighborPlanes) * observerIndex,
+            numNeighborPlanes < 0 ? 1 : 0,
+            blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax, zmax,
+            xminPhysical, yminPhysical, zminPhysical,
+            coordinateScale, pos, 0, static_cast<float>(detectorDouble[0]),
+            static_cast<float>(detectorDouble[1]), static_cast<float>(detectorDouble[2]),
+            1.0 / 0.0, densityv, 1.0f / coordinateScale, initialCell, detectorTauVolumev, observerIndex,
+            &localStatus);
+        if (localStatus != 1)
+        {
+            atomicExch(statusv, 0);
+            return;
+        }
+        samplePos[numValidSamples][0] = pos[0];
+        samplePos[numValidSamples][1] = pos[1];
+        samplePos[numValidSamples][2] = pos[2];
+        sampleColDensity[numValidSamples] = colDensity;
+        ++numValidSamples;
+    }
+    if (numValidSamples <= 0) return;
+
+    const float* entityCdf = cdfv + static_cast<unsigned long long>(localEntity) * numSourceWavelengths;
+    for (int slot = observerIndex; slot >= 0; slot = skirt_detector_chain_next(detectorIntv, slot))
+    {
+        const double* slotDouble = detectorDoublev + detectorDoubleStride * slot;
+        const int* slotInt = detectorIntv + detectorIntStride * slot;
+        const unsigned long long* slotAddress = accumulatorAddressv + 2 * slot;
+        int rawBandCount = slotInt[4];
+        int frameBandCount = rawBandCount < 0 ? -rawBandCount : rawBandCount;
+        if (slotAddress[0] && frameBandCount > 0)
+        {
+            int samplePixel[maxDirectSamples];
+            bool anySlotPixel = false;
+            for (int s = 0; s < numValidSamples; ++s)
+            {
+                double xpp = -slotDouble[6] * samplePos[s][0] + slotDouble[5] * samplePos[s][1];
+                double ypp = -slotDouble[5] * slotDouble[3] * samplePos[s][0]
+                             - slotDouble[6] * slotDouble[3] * samplePos[s][1] + slotDouble[4] * samplePos[s][2];
+                double xp = slotDouble[7] * xpp - slotDouble[8] * ypp;
+                double yp = slotDouble[8] * xpp + slotDouble[7] * ypp;
+                int i = static_cast<int>(floor((xp - slotDouble[9]) / slotDouble[10]));
+                int j = static_cast<int>(floor((yp - slotDouble[11]) / slotDouble[12]));
+                if (i >= 0 && i < slotInt[0] && j >= 0 && j < slotInt[1])
+                {
+                    samplePixel[s] = i + slotInt[0] * j;
+                    anySlotPixel = true;
+                }
+                else
+                    samplePixel[s] = -1;
+            }
+            if (anySlotPixel)
+            {
+                double* frameAccumulator = reinterpret_cast<double*>(slotAddress[0]);
+                int frameBandBegin = slotInt[3];
+                double zFactor = 1.0 + slotDouble[13];
+                double invZFactor = zFactor > 0.0 ? 1.0 / zFactor : 1.0;
+                for (int localBand = 0; localBand != frameBandCount; ++localBand)
+                {
+                    int band = frameBandBegin + localBand;
+                    int begin = bandOffsetv[band];
+                    int end = bandOffsetv[band + 1];
+                    if (end - begin < 2) continue;
+                    double lambdaMinRest = bandWavelengthv[begin] * invZFactor;
+                    double lambdaMaxRest = bandWavelengthv[end - 1] * invZFactor;
+                    if (!(lambdaMaxRest > lambdaMinRest)) continue;
+                    if (lambdaMaxRest <= wavelengthv[0] || lambdaMinRest >= wavelengthv[numSourceWavelengths - 1])
+                        continue;
+
+                    if (end - begin == 2 && bandTransmissionv[begin] == bandTransmissionv[begin + 1])
+                    {
+                        double trans = bandTransmissionv[begin] * bandWidthv[band];
+                        if (trans <= 0.0) continue;
+                        double cBandStart =
+                            skirt_interpolate_source_cdf(wavelengthv, entityCdf, numSourceWavelengths, lambdaMinRest);
+                        double cBandEnd =
+                            skirt_interpolate_source_cdf(wavelengthv, entityCdf, numSourceWavelengths, lambdaMaxRest);
+                        if (cBandEnd <= cBandStart) continue;
+                        constexpr int numTopHatSub = 4;
+                        double dLambda = (lambdaMaxRest - lambdaMinRest) / static_cast<double>(numTopHatSub);
+                        double prevC = cBandStart;
+                        double sumW0 = 0.0, sumWKappa0 = 0.0;
+                        double sumW1 = 0.0, sumWKappa1 = 0.0;
+                        for (int q = 0; q < numTopHatSub; ++q)
+                        {
+                            double l1 = (q + 1 == numTopHatSub)
+                                            ? lambdaMaxRest
+                                            : (lambdaMinRest + static_cast<double>(q + 1) * dLambda);
+                            double nextC = (q + 1 == numTopHatSub)
+                                               ? cBandEnd
+                                               : skirt_interpolate_source_cdf(wavelengthv, entityCdf,
+                                                                              numSourceWavelengths, l1);
+                            double dC = nextC - prevC;
+                            prevC = nextC;
+                            if (dC <= 0.0) continue;
+                            double midRest = lambdaMinRest + (static_cast<double>(q) + 0.5) * dLambda;
+                            int tIdx = skirt_section_lookup_index(lookupWavelengthv, lookupBegin, lookupCount, midRest);
+                            double w = dC * trans;
+                            double kappa = sectionTablev[tIdx];
+                            if (q < (numTopHatSub >> 1))
+                            {
+                                sumW0 += w;
+                                sumWKappa0 += w * kappa;
+                            }
+                            else
+                            {
+                                sumW1 += w;
+                                sumWKappa1 += w * kappa;
+                            }
+                        }
+                        if (sumW0 + sumW1 <= 0.0) continue;
+                        float meanKappa0 = sumW0 > 0.0 ? static_cast<float>(sumWKappa0 / sumW0) : 0.0f;
+                        float meanKappa1 = sumW1 > 0.0 ? static_cast<float>(sumWKappa1 / sumW1) : 0.0f;
+                        double baseW0 = sampleLuminosity * sumW0;
+                        double baseW1 = sampleLuminosity * sumW1;
+                        int pendingKey = -1;
+                        double pendingVal = 0.0;
+                        for (int s = 0; s < numValidSamples; ++s)
+                        {
+                            int pixel = samplePixel[s];
+                            if (pixel < 0) continue;
+                            int key = pixel + localBand * slotInt[2];
+                            if (key < 0 || key >= slotInt[5]) continue;
+                            float col = sampleColDensity[s];
+                            double contrib =
+                                (baseW0 > 0.0 ? baseW0 * static_cast<double>(expf(-col * meanKappa0)) : 0.0)
+                                + (baseW1 > 0.0 ? baseW1 * static_cast<double>(expf(-col * meanKappa1)) : 0.0);
+                            if (key == pendingKey)
+                                pendingVal += contrib;
+                            else
+                            {
+                                if (pendingKey >= 0 && pendingVal > 0.0)
+                                    skirt_atomic_add_double(frameAccumulator + pendingKey, pendingVal);
+                                pendingKey = key;
+                                pendingVal = contrib;
+                            }
+                        }
+                        if (pendingKey >= 0 && pendingVal > 0.0)
+                            skirt_atomic_add_double(frameAccumulator + pendingKey, pendingVal);
+                        continue;
+                    }
+
+                    int k = skirt_lower_bound_double(wavelengthv, numSourceWavelengths, lambdaMinRest);
+                    if (k > 0) --k;
+                    if (k + 1 >= numSourceWavelengths) continue;
+                    if (static_cast<double>(entityCdf[numSourceWavelengths - 1]) <= static_cast<double>(entityCdf[k]))
+                        continue;
+
+                    int bIdx = begin;
+                    int tIdx = skirt_section_lookup_index(lookupWavelengthv, lookupBegin, lookupCount,
+                                                          fmax(lambdaMinRest, wavelengthv[k]));
+                    int tEnd = lookupBegin + lookupCount;
+                    double width = bandWidthv[band];
+                    double midBandRest = 0.5 * (lambdaMinRest + lambdaMaxRest);
+                    double sumW0 = 0.0, sumWKappa0 = 0.0;
+                    double sumW1 = 0.0, sumWKappa1 = 0.0;
+                    for (; k + 1 < numSourceWavelengths; ++k)
+                    {
+                        double x0 = wavelengthv[k];
+                        if (x0 >= lambdaMaxRest) break;
+                        double x1 = wavelengthv[k + 1];
+                        if (x1 <= lambdaMinRest || !(x1 > x0)) continue;
+                        double c0 = static_cast<double>(entityCdf[k]);
+                        double c1 = static_cast<double>(entityCdf[k + 1]);
+                        double dC = c1 - c0;
+                        if (dC <= 0.0) continue;
+
+                        double a = x0 > lambdaMinRest ? x0 : lambdaMinRest;
+                        double b = x1 < lambdaMaxRest ? x1 : lambdaMaxRest;
+                        if (a > x0 || b < x1) dC *= (b - a) / (x1 - x0);
+
+                        double midRest = 0.5 * (a + b);
+                        double midObs = midRest * zFactor;
+                        while (bIdx + 2 < end && bandWavelengthv[bIdx + 1] <= midObs) ++bIdx;
+                        double bx0 = bandWavelengthv[bIdx];
+                        double bx1 = bandWavelengthv[bIdx + 1];
+                        if (!(midObs > bx0 && midObs < bx1)) continue;
+                        double by0 = bandTransmissionv[bIdx];
+                        double by1 = bandTransmissionv[bIdx + 1];
+                        double trans =
+                            (by0 == by1 ? by0 : (by0 + ((midObs - bx0) / (bx1 - bx0)) * (by1 - by0))) * width;
+                        if (trans <= 0.0) continue;
+
+                        while (tIdx + 1 < tEnd
+                               && 0.5 * (lookupWavelengthv[tIdx] + lookupWavelengthv[tIdx + 1]) <= midRest)
+                            ++tIdx;
+                        double w = dC * trans;
+                        double kappa = sectionTablev[tIdx];
+                        if (midRest <= midBandRest)
+                        {
+                            sumW0 += w;
+                            sumWKappa0 += w * kappa;
+                        }
+                        else
+                        {
+                            sumW1 += w;
+                            sumWKappa1 += w * kappa;
+                        }
+                    }
+                    if (sumW0 + sumW1 > 0.0)
+                    {
+                        float meanKappa0 = sumW0 > 0.0 ? static_cast<float>(sumWKappa0 / sumW0) : 0.0f;
+                        float meanKappa1 = sumW1 > 0.0 ? static_cast<float>(sumWKappa1 / sumW1) : 0.0f;
+                        double baseW0 = sampleLuminosity * sumW0;
+                        double baseW1 = sampleLuminosity * sumW1;
+                        int pendingKey = -1;
+                        double pendingVal = 0.0;
+                        for (int s = 0; s < numValidSamples; ++s)
+                        {
+                            int pixel = samplePixel[s];
+                            if (pixel < 0) continue;
+                            int key = pixel + localBand * slotInt[2];
+                            if (key < 0 || key >= slotInt[5]) continue;
+                            float col = sampleColDensity[s];
+                            double contrib =
+                                (baseW0 > 0.0 ? baseW0 * static_cast<double>(expf(-col * meanKappa0)) : 0.0)
+                                + (baseW1 > 0.0 ? baseW1 * static_cast<double>(expf(-col * meanKappa1)) : 0.0);
+                            if (key == pendingKey)
+                                pendingVal += contrib;
+                            else
+                            {
+                                if (pendingKey >= 0 && pendingVal > 0.0)
+                                    skirt_atomic_add_double(frameAccumulator + pendingKey, pendingVal);
+                                pendingKey = key;
+                                pendingVal = contrib;
+                            }
+                        }
+                        if (pendingKey >= 0 && pendingVal > 0.0)
+                            skirt_atomic_add_double(frameAccumulator + pendingKey, pendingVal);
+                    }
+                }
+            }
+        }
+        if (slotAddress[1] && slotInt[7] > 0)
+        {
+            double radiusSquared = slotDouble[18];
+            bool sampleInside[maxDirectSamples];
+            bool anyInside = false;
+            for (int s = 0; s < numValidSamples; ++s)
+            {
+                bool inside = true;
+                if (radiusSquared > 0.0)
+                {
+                    double xpp = -slotDouble[17] * samplePos[s][0] + slotDouble[16] * samplePos[s][1];
+                    double ypp = -slotDouble[16] * slotDouble[14] * samplePos[s][0]
+                                 - slotDouble[17] * slotDouble[14] * samplePos[s][1] + slotDouble[15] * samplePos[s][2];
+                    if (xpp * xpp + ypp * ypp > radiusSquared) inside = false;
+                }
+                sampleInside[s] = inside;
+                if (inside) anyInside = true;
+            }
+            if (anyInside)
+            {
+                double* sedAccumulator = reinterpret_cast<double*>(slotAddress[1]);
+                int sedBinBegin = slotInt[6];
+                int sedBinCount = slotInt[7];
+                double zFactor = 1.0 + slotDouble[19];
+                double invZFactor = zFactor > 0.0 ? 1.0 / zFactor : 1.0;
+                for (int localBin = 0; localBin < sedBinCount && localBin < slotInt[8]; ++localBin)
+                {
+                    double lMin = sedBorderPairv[2 * (sedBinBegin + localBin)] * invZFactor;
+                    double lMax = sedBorderPairv[2 * (sedBinBegin + localBin) + 1] * invZFactor;
+                    if (!(lMax > lMin)) continue;
+                    double c0 = skirt_interpolate_source_cdf(wavelengthv, entityCdf, numSourceWavelengths, lMin);
+                    double c1 = skirt_interpolate_source_cdf(wavelengthv, entityCdf, numSourceWavelengths, lMax);
+                    if (c1 <= c0) continue;
+                    double midRest = 0.5 * (lMin + lMax);
+                    int tableIndex = skirt_section_lookup_index(lookupWavelengthv, lookupBegin, lookupCount, midRest);
+                    float kappa = static_cast<float>(sectionTablev[tableIndex]);
+                    double baseW = sampleLuminosity * (c1 - c0);
+                    double binContrib = 0.0;
+                    for (int s = 0; s < numValidSamples; ++s)
+                    {
+                        if (!sampleInside[s]) continue;
+                        binContrib += baseW * static_cast<double>(expf(-sampleColDensity[s] * kappa));
+                    }
+                    if (binContrib > 0.0) skirt_atomic_add_double(sedAccumulator + localBin, binContrib);
+                }
+            }
+        }
+    }
 }
 
 extern "C" __global__ void dust_cell_source_lifecycle_initialize(
@@ -7692,9 +9075,30 @@ extern "C" __global__ void dust_cell_source_lifecycle_initialize(
     double mixtureRandom = skirt_lifecycle_uniform(&state);
     double spectralRandom = skirt_lifecycle_uniform(&state);
     double lambda = wavelengthv[0];
+    double spectralWeight = 1.0;
     if (wavelengthBias > 0.0 && mixtureRandom <= wavelengthBias)
     {
         lambda = exp(biasLogMin + biasLogWidth * spectralRandom);
+        int wavelengthRight = skirt_lower_bound_double(wavelengthv, numSourceWavelengths, lambda);
+        if (wavelengthRight < 1) wavelengthRight = 1;
+        if (wavelengthRight >= numSourceWavelengths) wavelengthRight = numSourceWavelengths - 1;
+        int wavelengthLeft = wavelengthRight - 1;
+        double x0 = wavelengthv[wavelengthLeft];
+        double x1 = wavelengthv[wavelengthRight];
+        double p0 = static_cast<double>(entityPdf[wavelengthLeft]);
+        double p1 = static_cast<double>(entityPdf[wavelengthRight]);
+        double specificLuminosity = 0.0;
+        if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
+        {
+            double alpha = log(p1 / p0) / log(x1 / x0);
+            specificLuminosity = p0 * pow(lambda / x0, alpha);
+        }
+        double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
+        double combined = (1.0 - wavelengthBias) * specificLuminosity
+                          + wavelengthBias * biasProbability;
+        spectralWeight = specificLuminosity > 0.0 && combined > 0.0
+                             ? specificLuminosity / combined
+                             : 0.0;
     }
     else
     {
@@ -7711,31 +9115,30 @@ extern "C" __global__ void dust_cell_source_lifecycle_initialize(
         double alpha = p0 > 0.0 && p1 > 0.0 ? log(p1 / p0) / log(x1 / x0) : 0.0;
         lambda = p0 > 0.0 ? x0 * skirt_gexp(-alpha, (spectralRandom - c0) / (p0 * x0)) : x0;
         if (!(lambda >= x0 && lambda <= x1)) lambda = x0;
-    }
-
-    int wavelengthRight = skirt_lower_bound_double(wavelengthv, numSourceWavelengths, lambda);
-    if (wavelengthRight < 1) wavelengthRight = 1;
-    if (wavelengthRight >= numSourceWavelengths) wavelengthRight = numSourceWavelengths - 1;
-    int wavelengthLeft = wavelengthRight - 1;
-    double x0 = wavelengthv[wavelengthLeft];
-    double x1 = wavelengthv[wavelengthRight];
-    double p0 = static_cast<double>(entityPdf[wavelengthLeft]);
-    double p1 = static_cast<double>(entityPdf[wavelengthRight]);
-    double specificLuminosity = 0.0;
-    if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
-    {
-        double alpha = log(p1 / p0) / log(x1 / x0);
-        specificLuminosity = p0 * pow(lambda / x0, alpha);
-    }
-    double spectralWeight = 1.0;
-    if (wavelengthBias > 0.0)
-    {
-        double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
-        double combined = (1.0 - wavelengthBias) * specificLuminosity
-                          + wavelengthBias * biasProbability;
-        spectralWeight = specificLuminosity > 0.0 && combined > 0.0
-                             ? specificLuminosity / combined
-                             : 0.0;
+        if (wavelengthBias > 0.0)
+        {
+            double specificLuminosity = 0.0;
+            if (lambda == x0 && left > 0)
+            {
+                double prevX0 = wavelengthv[left - 1];
+                double prevP0 = static_cast<double>(entityPdf[left - 1]);
+                if (prevP0 > 0.0 && p0 > 0.0 && prevX0 > 0.0 && x0 > prevX0)
+                {
+                    double prevAlpha = log(p0 / prevP0) / log(x0 / prevX0);
+                    specificLuminosity = prevP0 * pow(lambda / prevX0, prevAlpha);
+                }
+            }
+            else if (p0 > 0.0 && p1 > 0.0 && x0 > 0.0 && x1 > x0)
+            {
+                specificLuminosity = p0 * pow(lambda / x0, alpha);
+            }
+            double biasProbability = biasLogWidth > 0.0 ? 1.0 / (biasLogWidth * lambda) : 0.0;
+            double combined = (1.0 - wavelengthBias) * specificLuminosity
+                              + wavelengthBias * biasProbability;
+            spectralWeight = specificLuminosity > 0.0 && combined > 0.0
+                                 ? specificLuminosity / combined
+                                 : 0.0;
+        }
     }
 
     int cell = cellIndexv[entity];
@@ -10799,8 +12202,10 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                             detectorInt[1] = frame.numPixelsY;
                             detectorInt[2] = static_cast<int>(frame.numPixelsInFrame);
                             detectorInt[3] = static_cast<int>(bandWidthv.size());
-                            detectorInt[4] = static_cast<int>(numBands);
                             detectorInt[5] = static_cast<int>(frame.numAccumulatorValues);
+                            bool monotonicBands = true;
+                            double prevMinLambda = -std::numeric_limits<double>::infinity();
+                            double prevMaxLambda = -std::numeric_limits<double>::infinity();
                             for (size_t band = 0; band != numBands; ++band)
                             {
                                 int begin = frame.bandOffsetv[band];
@@ -10809,6 +12214,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                     || static_cast<size_t>(end) > frame.bandWavelengthv.size()
                                     || frame.bandWidthv[band] <= 0.)
                                     return false;
+                                double minLambda = frame.bandWavelengthv[begin];
+                                double maxLambda = frame.bandWavelengthv[end - 1];
+                                if (minLambda < prevMinLambda || maxLambda < prevMaxLambda || minLambda > maxLambda)
+                                    monotonicBands = false;
+                                prevMinLambda = minLambda;
+                                prevMaxLambda = maxLambda;
                                 bandWavelengthv.insert(bandWavelengthv.end(), frame.bandWavelengthv.begin() + begin,
                                                        frame.bandWavelengthv.begin() + end);
                                 bandTransmissionv.insert(bandTransmissionv.end(),
@@ -10819,6 +12230,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                     return false;
                                 bandOffsetv.push_back(static_cast<int>(bandWavelengthv.size()));
                             }
+                            detectorInt[4] = monotonicBands ? -static_cast<int>(numBands)
+                                                            : static_cast<int>(numBands);
                         }
 
                         if (sed.accumulatorKey)
@@ -11282,8 +12695,10 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                             detectorInt[1] = frame.numPixelsY;
                             detectorInt[2] = static_cast<int>(frame.numPixelsInFrame);
                             detectorInt[3] = static_cast<int>(bandWidthv.size());
-                            detectorInt[4] = static_cast<int>(numBands);
                             detectorInt[5] = static_cast<int>(frame.numAccumulatorValues);
+                            bool monotonicBands = true;
+                            double prevMinLambda = -std::numeric_limits<double>::infinity();
+                            double prevMaxLambda = -std::numeric_limits<double>::infinity();
                             for (size_t band = 0; band != numBands; ++band)
                             {
                                 int begin = frame.bandOffsetv[band];
@@ -11292,6 +12707,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                     || static_cast<size_t>(end) > frame.bandWavelengthv.size()
                                     || frame.bandWidthv[band] <= 0.0)
                                     return false;
+                                double minLambda = frame.bandWavelengthv[begin];
+                                double maxLambda = frame.bandWavelengthv[end - 1];
+                                if (minLambda < prevMinLambda || maxLambda < prevMaxLambda || minLambda > maxLambda)
+                                    monotonicBands = false;
+                                prevMinLambda = minLambda;
+                                prevMaxLambda = maxLambda;
                                 bandWavelengthv.insert(bandWavelengthv.end(), frame.bandWavelengthv.begin() + begin,
                                                        frame.bandWavelengthv.begin() + end);
                                 bandTransmissionv.insert(bandTransmissionv.end(),
@@ -11302,6 +12723,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                     return false;
                                 bandOffsetv.push_back(static_cast<int>(bandWavelengthv.size()));
                             }
+                            detectorInt[4] = monotonicBands ? -static_cast<int>(numBands)
+                                                            : static_cast<int>(numBands);
                         }
                         if (sed.accumulatorKey)
                         {
@@ -11366,11 +12789,22 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     float maxDensity = 0.0f;
                     float maxColumnDensity = 0.0f;
                     double normalizationSpan = 1.0;
-                    vector<float> siteFloatv;
                     vector<float> densityFloatv;
                     vector<float> blockMaxDensityv;
                     int columnBlockN = blockN;
                     CUdeviceptr dNeighborPlanev = 0;
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    if (emitLifecycleProfile)
+                    {
+                        lifecycleProfileStart = std::chrono::steady_clock::now();
+                        lifecycleProfileMark = lifecycleProfileStart;
+                    }
+                    if (!ensureReady() || !check(_cuCtxSetCurrent(_context), "cuCtxSetCurrent")
+                        || !ensureStateOnDevice(state) || !ensureModule()
+                        || !ensureVoronoiOnDevice(gridKey, sitev, neighborBeginv, neighborCountv, neighborIndexv,
+                                                  blockBeginv, blockCountv, blockIndexv))
+                        return false;
+                    bool cachedLifecycleDensity = false;
                     if (mixedLifecycle)
                     {
                         double maxSpan = std::max({xmax - xmin, ymax - ymin, zmax - zmin});
@@ -11382,86 +12816,128 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         mixedXmax = static_cast<float>((xmax - xmin) / maxSpan);
                         mixedYmax = static_cast<float>((ymax - ymin) / maxSpan);
                         mixedZmax = static_cast<float>((zmax - zmin) / maxSpan);
-                        siteFloatv.resize(sitev.size());
-                        for (size_t cell = 0; cell != static_cast<size_t>(numCells); ++cell)
+                        if (!ensureVoronoiPlanesOnDevice(gridKey, sitev, neighborBeginv, neighborCountv,
+                                                         neighborIndexv, xmin, ymin, zmin, normalizationSpan))
+                            return false;
+                        dNeighborPlanev = _voronoiNeighborPlaneFloatDevice;
+                        unsigned long long sourceToken = importedSource ? importedSource->cacheToken : 0ULL;
+                        cachedLifecycleDensity =
+                            _lifecycleDensityStateGen == _stateGeneration
+                            && _lifecycleDensityGridKey == gridKey
+                            && _lifecycleDensityNumCells == numCells
+                            && _lifecycleDensityOffset == densityOffset
+                            && _residentScratch[ResidentDensityFloat].ptr != 0
+                            && _residentScratch[ResidentDensityFloat].bytes >= static_cast<size_t>(numCells) * sizeof(float)
+                            && (!blockColumnBound
+                                || (_lifecycleBlockColumnBound
+                                    && _lifecycleBlockDustSource == directDustCellSource
+                                    && (!directDustCellSource || _lifecycleBlockSourceToken == sourceToken)
+                                    && _residentScratch[ResidentLifecycleBlockMaxDensity].ptr != 0));
+                        if (cachedLifecycleDensity)
                         {
-                            siteFloatv[3 * cell] = static_cast<float>((sitev[3 * cell] - xmin) / maxSpan);
-                            siteFloatv[3 * cell + 1] = static_cast<float>((sitev[3 * cell + 1] - ymin) / maxSpan);
-                            siteFloatv[3 * cell + 2] = static_cast<float>((sitev[3 * cell + 2] - zmin) / maxSpan);
+                            maxDensity = _lifecycleMaxDensity;
+                            if (blockColumnBound) columnBlockN = _lifecycleColumnBlockN;
                         }
-                        densityFloatv.resize(numCells);
-                        const double* stateData = state.data();
-                        int numStateVars = state.numVars();
-                        for (int cell = 0; cell != numCells; ++cell)
-                            densityFloatv[cell] = static_cast<float>(stateData[cell * numStateVars + densityOffset]);
-                        maxDensity = *std::max_element(densityFloatv.begin(), densityFloatv.end());
-                        if (blockColumnBound)
+                        else
                         {
-                            size_t configuredColumnBlockN = environmentSizeValue("SKIRTGPU_COLUMN_BOUND_BLOCKS", 32);
-                            if (configuredColumnBlockN < 16 || configuredColumnBlockN > 128)
-                                configuredColumnBlockN = 32;
-                            if (directDustCellSource)
+                            densityFloatv.resize(numCells);
+                            const double* stateData = state.data();
+                            int numStateVars = state.numVars();
+                            double sumRho = 0.0, sumRhoX = 0.0, sumRhoY = 0.0, sumRhoZ = 0.0;
+                            for (int cell = 0; cell != numCells; ++cell)
                             {
-                                columnBlockN = static_cast<int>(configuredColumnBlockN);
-                                size_t numColumnBlocks = configuredColumnBlockN * configuredColumnBlockN
-                                                         * configuredColumnBlockN;
-                                blockMaxDensityv.assign(numColumnBlocks, 0.0f);
-                                double xspan = xmax - xmin;
-                                double yspan = ymax - ymin;
-                                double zspan = zmax - zmin;
-                                auto blockIndexRange = [configuredColumnBlockN](double lower, double upper,
-                                                                                double minimum, double span,
-                                                                                int& first, int& last) {
-                                    if (!std::isfinite(lower) || !std::isfinite(upper) || !(span > 0.0)
-                                        || lower > upper)
-                                        return false;
-                                    double scale = static_cast<double>(configuredColumnBlockN) / span;
-                                    first = static_cast<int>(std::floor((lower - minimum) * scale));
-                                    last = static_cast<int>(std::floor((upper - minimum) * scale));
-                                    int maximum = static_cast<int>(configuredColumnBlockN) - 1;
-                                    first = std::max(0, std::min(first, maximum));
-                                    last = std::max(0, std::min(last, maximum));
-                                    return first <= last;
-                                };
-                                size_t numEntities = importedSource->cellIndexv.size();
-                                for (size_t p = 0; p != numEntities; ++p)
+                                float rho = static_cast<float>(stateData[cell * numStateVars + densityOffset]);
+                                densityFloatv[cell] = rho;
+                                if (rho > 0.0f)
                                 {
-                                    int cell = importedSource->cellIndexv[p];
-                                    const double* extent = importedSource->cellExtentv.data() + 6 * p;
-                                    int i0, i1, j0, j1, k0, k1;
-                                    if (!blockIndexRange(extent[0], extent[3], xmin, xspan, i0, i1)
-                                        || !blockIndexRange(extent[1], extent[4], ymin, yspan, j0, j1)
-                                        || !blockIndexRange(extent[2], extent[5], zmin, zspan, k0, k1))
-                                        return false;
-                                    float density = densityFloatv[cell];
-                                    for (int i = i0; i <= i1; ++i)
-                                        for (int j = j0; j <= j1; ++j)
-                                            for (int k = k0; k <= k1; ++k)
-                                            {
-                                                size_t block = (static_cast<size_t>(i) * configuredColumnBlockN
-                                                                    + static_cast<size_t>(j))
-                                                                       * configuredColumnBlockN
-                                                                   + static_cast<size_t>(k);
-                                                blockMaxDensityv[block] =
-                                                    std::max(blockMaxDensityv[block], density);
-                                            }
+                                    double w = static_cast<double>(rho);
+                                    sumRho += w;
+                                    sumRhoX += w * ((sitev[3 * static_cast<size_t>(cell)] - xmin) / maxSpan);
+                                    sumRhoY += w * ((sitev[3 * static_cast<size_t>(cell) + 1] - ymin) / maxSpan);
+                                    sumRhoZ += w * ((sitev[3 * static_cast<size_t>(cell) + 2] - zmin) / maxSpan);
                                 }
+                            }
+                            if (sumRho > 0.0)
+                            {
+                                _lifecycleDustCenter[0] = static_cast<float>(sumRhoX / sumRho);
+                                _lifecycleDustCenter[1] = static_cast<float>(sumRhoY / sumRho);
+                                _lifecycleDustCenter[2] = static_cast<float>(sumRhoZ / sumRho);
                             }
                             else
                             {
-                                blockMaxDensityv.resize(blockBeginv.size(), 0.0f);
-                                for (size_t block = 0; block != blockBeginv.size(); ++block)
+                                _lifecycleDustCenter[0] = 0.5f * mixedXmax;
+                                _lifecycleDustCenter[1] = 0.5f * mixedYmax;
+                                _lifecycleDustCenter[2] = 0.5f * mixedZmax;
+                            }
+                            maxDensity = *std::max_element(densityFloatv.begin(), densityFloatv.end());
+                            if (blockColumnBound)
+                            {
+                                size_t configuredColumnBlockN = environmentSizeValue("SKIRTGPU_COLUMN_BOUND_BLOCKS", 32);
+                                if (configuredColumnBlockN < 16 || configuredColumnBlockN > 128)
+                                    configuredColumnBlockN = 32;
+                                if (directDustCellSource)
                                 {
-                                    int begin = blockBeginv[block];
-                                    int count = blockCountv[block];
-                                    float blockMax = 0.0f;
-                                    for (int p = 0; p != count; ++p)
+                                    columnBlockN = static_cast<int>(configuredColumnBlockN);
+                                    size_t numColumnBlocks = configuredColumnBlockN * configuredColumnBlockN
+                                                             * configuredColumnBlockN;
+                                    blockMaxDensityv.assign(numColumnBlocks, 0.0f);
+                                    double xspan = xmax - xmin;
+                                    double yspan = ymax - ymin;
+                                    double zspan = zmax - zmin;
+                                    auto blockIndexRange = [configuredColumnBlockN](double lower, double upper,
+                                                                                    double minimum, double span,
+                                                                                    int& first, int& last) {
+                                        if (!std::isfinite(lower) || !std::isfinite(upper) || !(span > 0.0)
+                                            || lower > upper)
+                                            return false;
+                                        double scale = static_cast<double>(configuredColumnBlockN) / span;
+                                        first = static_cast<int>(std::floor((lower - minimum) * scale));
+                                        last = static_cast<int>(std::floor((upper - minimum) * scale));
+                                        int maximum = static_cast<int>(configuredColumnBlockN) - 1;
+                                        first = std::max(0, std::min(first, maximum));
+                                        last = std::max(0, std::min(last, maximum));
+                                        return first <= last;
+                                    };
+                                    size_t numEntities = importedSource->cellIndexv.size();
+                                    for (size_t p = 0; p != numEntities; ++p)
                                     {
-                                        int cell = blockIndexv[begin + p];
-                                        if (cell >= 0 && cell < numCells)
-                                            blockMax = std::max(blockMax, densityFloatv[cell]);
+                                        int cell = importedSource->cellIndexv[p];
+                                        const double* extent = importedSource->cellExtentv.data() + 6 * p;
+                                        int i0, i1, j0, j1, k0, k1;
+                                        if (!blockIndexRange(extent[0], extent[3], xmin, xspan, i0, i1)
+                                            || !blockIndexRange(extent[1], extent[4], ymin, yspan, j0, j1)
+                                            || !blockIndexRange(extent[2], extent[5], zmin, zspan, k0, k1))
+                                            return false;
+                                        float density = densityFloatv[cell];
+                                        for (int i = i0; i <= i1; ++i)
+                                            for (int j = j0; j <= j1; ++j)
+                                                for (int k = k0; k <= k1; ++k)
+                                                {
+                                                    size_t block = (static_cast<size_t>(i) * configuredColumnBlockN
+                                                                        + static_cast<size_t>(j))
+                                                                           * configuredColumnBlockN
+                                                                       + static_cast<size_t>(k);
+                                                    blockMaxDensityv[block] =
+                                                        std::max(blockMaxDensityv[block], density);
+                                                }
                                     }
-                                    blockMaxDensityv[block] = blockMax;
+                                }
+                                else
+                                {
+                                    blockMaxDensityv.resize(blockBeginv.size(), 0.0f);
+                                    for (size_t block = 0; block != blockBeginv.size(); ++block)
+                                    {
+                                        int begin = blockBeginv[block];
+                                        int count = blockCountv[block];
+                                        float blockMax = 0.0f;
+                                        for (int p = 0; p != count; ++p)
+                                        {
+                                            int cell = blockIndexv[begin + p];
+                                            if (cell >= 0 && cell < numCells)
+                                                blockMax = std::max(blockMax, densityFloatv[cell]);
+                                        }
+                                        blockMaxDensityv[block] = blockMax;
+                                    }
                                 }
                             }
                         }
@@ -11469,19 +12945,6 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                                    + mixedZmax * mixedZmax);
                         maxColumnDensity = maxDensity * diagonal
                                            * (1.0f + 16.0f * std::numeric_limits<float>::epsilon());
-                    }
-                    std::lock_guard<std::mutex> lock(_mutex);
-                    if (!ensureReady() || !check(_cuCtxSetCurrent(_context), "cuCtxSetCurrent")
-                        || !ensureStateOnDevice(state) || !ensureModule()
-                        || !ensureVoronoiOnDevice(gridKey, sitev, neighborBeginv, neighborCountv, neighborIndexv,
-                                                  blockBeginv, blockCountv, blockIndexv))
-                        return false;
-                    if (mixedLifecycle)
-                    {
-                        if (!ensureVoronoiPlanesOnDevice(gridKey, siteFloatv, neighborBeginv, neighborCountv,
-                                                         neighborIndexv, xmin, ymin, zmin, normalizationSpan))
-                            return false;
-                        dNeighborPlanev = _voronoiNeighborPlaneFloatDevice;
                     }
 
                     CUdeviceptr dRadiationFieldAccumulator = 0;
@@ -11553,14 +13016,24 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     CUdeviceptr dSedBorderPairv = 0;
                     CUdeviceptr dLifecycleStatusv = 0;
                     CUdeviceptr dActiveIndexv = 0;
+                    CUdeviceptr dActiveIndexAltv = 0;
                     CUdeviceptr dActiveCountv = 0;
                     CUdeviceptr dSiteFloatv = 0;
                     CUdeviceptr dDensityFloatv = 0;
                     CUdeviceptr dDetectorPlanev = 0;
+                    CUdeviceptr dDetectorTauVolumev = 0;
                     CUdeviceptr dNeighborPlaneHalfv = 0;
                     CUdeviceptr dBlockMaxDensityv = 0;
                     CUdeviceptr dRadiationFieldBinBorderPairv = 0;
                     CUdeviceptr dEmissionVelocityv = 0;
+                    int numPackets = static_cast<int>(numPacketsHost);
+                    int numObservers = static_cast<int>(numObserversHost);
+                    int numRadiationFieldValuesInt = static_cast<int>(numRadiationFieldValues);
+                    bool earlyWavelengthCull = mixedLifecycle && !movingSources && !numRadiationFieldValuesInt
+                                               && isEnabled("SKIRTGPU_BROADBAND_CULL", true);
+                    bool inKernelWavelengthCull = false;
+                    bool hasSourceHintCells = false;
+                    bool singleSpectrumWindow = false;
                     int lifecycleStatus = 1;
                     bool ok = copyResidentScratch(ResidentLifecycleStatus, dLifecycleStatusv, &lifecycleStatus,
                                                   sizeof(int), "cuMemcpyHtoD(lifecycle status)");
@@ -11568,6 +13041,38 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         ok = ok && copyResidentScratch(ResidentEmissionVelocity, dEmissionVelocityv,
                             emissionVelocityv->data(), emissionVelocityv->size() * sizeof(double),
                             "cuMemcpyHtoD(source emission velocities)");
+                    if (mixedLifecycle)
+                    {
+                        dSiteFloatv = _voronoiSiteFloatDevice;
+                        dNeighborPlaneHalfv = _voronoiNeighborPlaneFloatDevice;
+                    }
+                    ok = ok
+                         && copyResidentScratchCached(ResidentDetectorDouble, dDetectorDoublev, detectorDoublev.data(),
+                                                      detectorDoublev.size() * sizeof(double),
+                                                      "cuMemcpyHtoD(lifecycle detector doubles)")
+                         && copyResidentScratchCached(ResidentDetectorInt, dDetectorIntv, detectorIntv.data(),
+                                                      detectorIntv.size() * sizeof(int),
+                                                      "cuMemcpyHtoD(lifecycle detector integers)")
+                         && copyResidentScratchCached(ResidentAccumulatorAddress, dAccumulatorAddressv,
+                                                      accumulatorAddressv.data(),
+                                                      accumulatorAddressv.size() * sizeof(unsigned long long),
+                                                      "cuMemcpyHtoD(lifecycle detector accumulators)")
+                         && copyResidentScratchCached(ResidentBandOffset, dBandOffsetv, bandOffsetv.data(),
+                                                      bandOffsetv.size() * sizeof(int),
+                                                      "cuMemcpyHtoD(lifecycle band offsets)")
+                         && copyResidentScratchCached(ResidentBandWavelength, dBandWavelengthv, bandWavelengthv.data(),
+                                                      bandWavelengthv.size() * sizeof(double),
+                                                      "cuMemcpyHtoD(lifecycle band wavelengths)")
+                         && copyResidentScratchCached(ResidentBandTransmission, dBandTransmissionv,
+                                                      bandTransmissionv.data(),
+                                                      bandTransmissionv.size() * sizeof(double),
+                                                      "cuMemcpyHtoD(lifecycle band transmissions)")
+                         && copyResidentScratchCached(ResidentBandWidth, dBandWidthv, bandWidthv.data(),
+                                                      bandWidthv.size() * sizeof(double),
+                                                      "cuMemcpyHtoD(lifecycle band widths)")
+                         && copyResidentScratchCached(ResidentSedBorderPair, dSedBorderPairv, sedBorderPairv.data(),
+                                                      sedBorderPairv.size() * sizeof(double),
+                                                      "cuMemcpyHtoD(lifecycle SED borders)");
                     if (directSourceLaunch)
                     {
                         ImportedSourceDeviceCache& sourceCache = _importedSourceCaches[importedSource->cacheToken];
@@ -11601,11 +13106,11 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                                       "cuMemAlloc(direct source lifecycle cells)");
                         int numRadiationFieldBins = radiationFieldAccumulatorKey ? numWavelengths : 0;
                         if (ok && numRadiationFieldBins)
-                            ok = copyResidentScratch(ResidentRadiationFieldBinBorderPair,
-                                                     dRadiationFieldBinBorderPairv,
-                                                     radiationFieldBinBorderPairv->data(),
-                                                     radiationFieldBinBorderPairv->size() * sizeof(double),
-                                                     "cuMemcpyHtoD(radiation field bin borders)");
+                            ok = copyResidentScratchCached(ResidentRadiationFieldBinBorderPair,
+                                                           dRadiationFieldBinBorderPairv,
+                                                           radiationFieldBinBorderPairv->data(),
+                                                           radiationFieldBinBorderPairv->size() * sizeof(double),
+                                                           "cuMemcpyHtoD(radiation field bin borders)");
                         if (ok)
                         {
                             int numEntities = static_cast<int>(importedSource->luminosityWeightv.size());
@@ -11649,7 +13154,71 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                             }
                             else
                             {
+                                if (ok && mixedLifecycle && sourceCache.particleCenterSize.ptr && numEntities > 0)
+                                {
+                                    size_t hintBytes = static_cast<size_t>(numEntities) * sizeof(int);
+                                    bool cachedHints =
+                                        sourceCache.entityHintCell.ptr
+                                        && sourceCache.entityHintCell.bytes >= hintBytes
+                                        && sourceCache.hintCellGridKey == gridKey
+                                        && sourceCache.hintCellXmin == xmin
+                                        && sourceCache.hintCellYmin == ymin
+                                        && sourceCache.hintCellZmin == zmin
+                                        && sourceCache.hintCellScale == static_cast<double>(coordinateScale);
+                                    if (!cachedHints)
+                                    {
+                                        if (sourceCache.entityHintCell.ptr
+                                            && sourceCache.entityHintCell.bytes < hintBytes)
+                                            releaseDeviceBuffer(sourceCache.entityHintCell);
+                                        if (!sourceCache.entityHintCell.ptr)
+                                        {
+                                            ok = allocate(sourceCache.entityHintCell.ptr, hintBytes);
+                                            if (ok) sourceCache.entityHintCell.bytes = hintBytes;
+                                        }
+                                        if (ok)
+                                        {
+                                            unsigned int hintBlock = 256;
+                                            unsigned int hintGrid = static_cast<unsigned int>(
+                                                (static_cast<size_t>(numEntities) + hintBlock - 1) / hintBlock);
+                                            void* hintArgs[] = {
+                                                &sourceCache.particleCenterSize.ptr,
+                                                &numEntities,
+                                                &dSiteFloatv,
+                                                &numCells,
+                                                &_voronoiNeighborBeginDevice,
+                                                &_voronoiNeighborCountDevice,
+                                                &_voronoiNeighborIndexDevice,
+                                                &_voronoiBlockBeginDevice,
+                                                &_voronoiBlockCountDevice,
+                                                &_voronoiBlockIndexDevice,
+                                                &blockN,
+                                                &mixedXmax,
+                                                &mixedYmax,
+                                                &mixedZmax,
+                                                &xmin,
+                                                &ymin,
+                                                &zmin,
+                                                &coordinateScale,
+                                                &sourceCache.entityHintCell.ptr};
+                                            ok = check(_cuLaunchKernel(_kernelImportedParticleSourcePrepareHintCells,
+                                                                       hintGrid, 1, 1, hintBlock, 1, 1, 0, nullptr,
+                                                                       hintArgs, nullptr),
+                                                       "cuLaunchKernel(imported particle source prepare hint cells)");
+                                            if (ok)
+                                            {
+                                                sourceCache.hintCellGridKey = gridKey;
+                                                sourceCache.hintCellXmin = xmin;
+                                                sourceCache.hintCellYmin = ymin;
+                                                sourceCache.hintCellZmin = zmin;
+                                                sourceCache.hintCellScale = static_cast<double>(coordinateScale);
+                                            }
+                                        }
+                                    }
+                                    hasSourceHintCells = ok && sourceCache.entityHintCell.ptr != 0;
+                                }
+                                int earlyWavelengthCullFlag = earlyWavelengthCull ? 1 : 0;
                                 size_t launched = 0;
+                                int windowCount = 0;
                                 while (ok && launched < numPacketsHost)
                                 {
                                     firstHistory = importedFirstHistoryIndex + launched;
@@ -11664,28 +13233,38 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                     CUdeviceptr numScatt = dNumScattv ? dNumScattv + launched * sizeof(int) : 0;
                                     CUdeviceptr wavelengthBin = dWavelengthBinv + launched * sizeof(int);
                                     CUdeviceptr lambda = dLambdav + launched * sizeof(double);
+                                    CUdeviceptr cellOut = dCellOutv + launched * sizeof(int);
                                     void* sourceArgs[] = {
-                                        &sourceCache.historyBegin.ptr,     &sourceCache.luminosityWeight.ptr,
+                                        &sourceCache.historyBegin.ptr,       &sourceCache.luminosityWeight.ptr,
                                         &sourceCache.particleCenterSize.ptr, &sourceCache.wavelength.ptr,
-                                        &sourceCache.pdf.ptr,              &sourceCache.pdfBfloat16.ptr,
-                                        &sourceCache.cdf.ptr,              &numEntities,
-                                        &numSourceWavelengths,             &sourceCache.spectrumFirstEntity,
-                                        &wavelengthBias,                  &biasLogMin,
-                                        &biasLogWidth,                    &firstHistory,
-                                        &numSourcePackets,                &importedLuminosityPerPacket,
-                                        &minWeightReduction,              &randomSeed,
-                                        &dRadiationFieldBinBorderPairv,    &numRadiationFieldBins,
-                                        &position,                        &direction,
-                                        &luminosity,                      &threshold,
-                                        &rngState,                        &numScatt,
-                                        &wavelengthBin,                   &lambda};
+                                        &sourceCache.pdf.ptr,                &sourceCache.pdfBfloat16.ptr,
+                                        &sourceCache.cdf.ptr,                &numEntities,
+                                        &numSourceWavelengths,               &sourceCache.spectrumFirstEntity,
+                                        &wavelengthBias,                     &biasLogMin,
+                                        &biasLogWidth,                       &firstHistory,
+                                        &numSourcePackets,                   &importedLuminosityPerPacket,
+                                        &minWeightReduction,                 &randomSeed,
+                                        &dRadiationFieldBinBorderPairv,      &numRadiationFieldBins,
+                                        &sourceCache.entityHintCell.ptr,     &earlyWavelengthCullFlag,
+                                        &dDetectorDoublev,                   &dDetectorIntv,
+                                        &dAccumulatorAddressv,               &numObservers,
+                                        &dBandOffsetv,                       &dBandWavelengthv,
+                                        &dBandTransmissionv,                 &dBandWidthv,
+                                        &dSedBorderPairv,                    &position,
+                                        &direction,                          &luminosity,
+                                        &threshold,                          &rngState,
+                                        &numScatt,                           &wavelengthBin,
+                                        &lambda,                             &cellOut};
                                     sourceGridSize = (numSourcePackets + sourceBlockSize - 1) / sourceBlockSize;
                                     ok = check(_cuLaunchKernel(_kernelImportedParticleSourceLifecycleInitialize,
                                                                sourceGridSize, 1, 1, sourceBlockSize, 1, 1, 0,
                                                                nullptr, sourceArgs, nullptr),
                                                "cuLaunchKernel(imported particle source lifecycle initialize)");
                                     launched += numSourcePackets;
+                                    ++windowCount;
                                 }
+                                singleSpectrumWindow = ok && windowCount == 1;
+                                inKernelWavelengthCull = earlyWavelengthCull;
                             }
                         }
                     }
@@ -11747,68 +13326,40 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                                  "cuMemAlloc(lifecycle output absorption depths)")
                         && ensureResidentScratch(ResidentWeightOut, dWeightOutv, numPacketsHost * sizeof(double),
                                                  "cuMemAlloc(lifecycle output weights)")
-                        && copyResidentScratch(ResidentDensityOffset, dDensityOffsetv, densityOffsetv.data(),
-                                               sizeof(int), "cuMemcpyHtoD(lifecycle density offset)")
-                        && copyResidentScratch(ResidentLookupBegin, dLookupBeginv, lookupBeginv.data(), sizeof(int),
-                                               "cuMemcpyHtoD(lifecycle lookup begin)")
-                        && copyResidentScratch(ResidentLookupCount, dLookupCountv, lookupCountv.data(), sizeof(int),
-                                               "cuMemcpyHtoD(lifecycle lookup count)")
-                        && copyResidentScratch(ResidentLookupWavelength, dLookupWavelengthv,
-                                               lookupWavelengthv.data(),
-                                               lookupWavelengthv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle lookup wavelengths)")
-                        && copyResidentScratch(ResidentSectionSca, dSectionScav, sectionScaTablev.data(),
-                                               sectionScaTablev.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle scattering sections)")
-                        && copyResidentScratch(ResidentSectionExt, dSectionExtv, sectionExtTablev.data(),
-                                               sectionExtTablev.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle extinction sections)")
-                        && copyResidentScratch(ResidentScatterAsymmpar, dAsymmparv, asymmparv.data(),
-                                               asymmparv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle asymmetry)")
-                        && copyResidentScratch(ResidentLifecycleZeroAsymmpar, dZeroAsymmparv,
-                                               zeroAsymmparv.data(), zeroAsymmparv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle zero asymmetry)")
-                        && copyResidentScratch(ResidentDetectorDouble, dDetectorDoublev, detectorDoublev.data(),
-                                               detectorDoublev.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle detector doubles)")
-                        && copyResidentScratch(ResidentDetectorInt, dDetectorIntv, detectorIntv.data(),
-                                               detectorIntv.size() * sizeof(int),
-                                               "cuMemcpyHtoD(lifecycle detector integers)")
-                        && copyResidentScratch(ResidentAccumulatorAddress, dAccumulatorAddressv,
-                                               accumulatorAddressv.data(),
-                                               accumulatorAddressv.size() * sizeof(unsigned long long),
-                                               "cuMemcpyHtoD(lifecycle detector accumulators)")
-                        && copyResidentScratch(ResidentBandOffset, dBandOffsetv, bandOffsetv.data(),
-                                               bandOffsetv.size() * sizeof(int),
-                                               "cuMemcpyHtoD(lifecycle band offsets)")
-                        && copyResidentScratch(ResidentBandWavelength, dBandWavelengthv, bandWavelengthv.data(),
-                                               bandWavelengthv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle band wavelengths)")
-                        && copyResidentScratch(ResidentBandTransmission, dBandTransmissionv,
-                                               bandTransmissionv.data(),
-                                               bandTransmissionv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle band transmissions)")
-                        && copyResidentScratch(ResidentBandWidth, dBandWidthv, bandWidthv.data(),
-                                               bandWidthv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle band widths)")
-                        && copyResidentScratch(ResidentSedBorderPair, dSedBorderPairv, sedBorderPairv.data(),
-                                               sedBorderPairv.size() * sizeof(double),
-                                               "cuMemcpyHtoD(lifecycle SED borders)")
+                        && copyResidentScratchCached(ResidentDensityOffset, dDensityOffsetv, densityOffsetv.data(),
+                                                     sizeof(int), "cuMemcpyHtoD(lifecycle density offset)")
+                        && copyResidentScratchCached(ResidentLookupBegin, dLookupBeginv, lookupBeginv.data(),
+                                                     sizeof(int), "cuMemcpyHtoD(lifecycle lookup begin)")
+                        && copyResidentScratchCached(ResidentLookupCount, dLookupCountv, lookupCountv.data(),
+                                                     sizeof(int), "cuMemcpyHtoD(lifecycle lookup count)")
+                        && copyResidentScratchCached(ResidentLookupWavelength, dLookupWavelengthv,
+                                                     lookupWavelengthv.data(),
+                                                     lookupWavelengthv.size() * sizeof(double),
+                                                     "cuMemcpyHtoD(lifecycle lookup wavelengths)")
+                        && copyResidentScratchCached(ResidentSectionSca, dSectionScav, sectionScaTablev.data(),
+                                                     sectionScaTablev.size() * sizeof(double),
+                                                     "cuMemcpyHtoD(lifecycle scattering sections)")
+                        && copyResidentScratchCached(ResidentSectionExt, dSectionExtv, sectionExtTablev.data(),
+                                                     sectionExtTablev.size() * sizeof(double),
+                                                     "cuMemcpyHtoD(lifecycle extinction sections)")
+                        && copyResidentScratchCached(ResidentScatterAsymmpar, dAsymmparv, asymmparv.data(),
+                                                     asymmparv.size() * sizeof(double),
+                                                     "cuMemcpyHtoD(lifecycle asymmetry)")
+                        && copyResidentScratchCached(ResidentLifecycleZeroAsymmpar, dZeroAsymmparv,
+                                                     zeroAsymmparv.data(), zeroAsymmparv.size() * sizeof(double),
+                                                     "cuMemcpyHtoD(lifecycle zero asymmetry)")
                         && ensureResidentScratch(ResidentLifecycleActiveIndex, dActiveIndexv,
                                                  numPacketsHost * sizeof(int),
                                                  "cuMemAlloc(lifecycle active indices)")
+                        && ensureResidentScratch(ResidentLifecycleActiveIndexAlt, dActiveIndexAltv,
+                                                 numPacketsHost * sizeof(int),
+                                                 "cuMemAlloc(lifecycle alt active indices)")
                         && ensureResidentScratch(ResidentLifecycleActiveCount, dActiveCountv, 2 * sizeof(int),
                                                  "cuMemAlloc(lifecycle active count)");
                     if (ok && !mixedLifecycle)
-                        ok = copyResidentScratch(ResidentLifecycleMaxDistance, dMaxDistancev,
-                                                 maxDistancev.data(), maxDistancev.size() * sizeof(double),
-                                                 "cuMemcpyHtoD(lifecycle observer distances)");
-                    if (ok && blockColumnBound)
-                        ok = copyResidentScratch(ResidentLifecycleBlockMaxDensity, dBlockMaxDensityv,
-                                                 blockMaxDensityv.data(),
-                                                 blockMaxDensityv.size() * sizeof(float),
-                                                 "cuMemcpyHtoD(lifecycle block maximum densities)");
+                        ok = copyResidentScratchCached(ResidentLifecycleMaxDistance, dMaxDistancev,
+                                                       maxDistancev.data(), maxDistancev.size() * sizeof(double),
+                                                       "cuMemcpyHtoD(lifecycle observer distances)");
                     // Per-observer detector planes cost (4 N_cells + 20 N_faces) bytes per observer: about 28 GB
                     // for 10 observers on a 9M-cell mesh. Beyond the budget (default 40% of free device memory,
                     // SKIRTGPU_DETECTOR_PLANE_BYTES overrides), detector rays use the shared transport planes.
@@ -11825,30 +13376,53 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                          ? freeBytes / 10 * 4 : size_t(8) << 30;
                         }
                         sharedDetectorPlanes = detectorPlaneBytes > budget;
-                        if (sharedDetectorPlanes) releaseResidentScratch(ResidentLifecycleDetectorPlane, dDetectorPlanev);
+                        if (sharedDetectorPlanes)
+                        {
+                            releaseResidentScratch(ResidentLifecycleDetectorPlane, dDetectorPlanev);
+                            _detectorPlaneGridKey = nullptr;
+                        }
                     }
                     if (ok && mixedLifecycle)
                     {
-                        ok = copyResidentScratch(ResidentVoronoiSiteFloat, dSiteFloatv, siteFloatv.data(),
-                                                 siteFloatv.size() * sizeof(float),
-                                                 "cuMemcpyHtoD(lifecycle float Voronoi sites)")
-                             && copyResidentScratch(ResidentDensityFloat, dDensityFloatv, densityFloatv.data(),
-                                                    densityFloatv.size() * sizeof(float),
-                                                    "cuMemcpyHtoD(lifecycle float densities)")
+                        if (cachedLifecycleDensity)
+                        {
+                            dDensityFloatv = _residentScratch[ResidentDensityFloat].ptr;
+                            if (blockColumnBound)
+                                dBlockMaxDensityv = _residentScratch[ResidentLifecycleBlockMaxDensity].ptr;
+                        }
+                        else
+                        {
+                            ok = copyResidentScratch(ResidentDensityFloat, dDensityFloatv, densityFloatv.data(),
+                                                     densityFloatv.size() * sizeof(float),
+                                                     "cuMemcpyHtoD(lifecycle float densities)")
+                                 && (!blockColumnBound
+                                     || copyResidentScratch(ResidentLifecycleBlockMaxDensity, dBlockMaxDensityv,
+                                                            blockMaxDensityv.data(),
+                                                            blockMaxDensityv.size() * sizeof(float),
+                                                            "cuMemcpyHtoD(lifecycle block maximum densities)"));
+                            if (ok)
+                            {
+                                _lifecycleDensityStateGen = _stateGeneration;
+                                _lifecycleDensityGridKey = gridKey;
+                                _lifecycleDensityNumCells = numCells;
+                                _lifecycleDensityOffset = densityOffset;
+                                _lifecycleBlockColumnBound = blockColumnBound;
+                                _lifecycleBlockDustSource = directDustCellSource;
+                                _lifecycleBlockSourceToken = importedSource ? importedSource->cacheToken : 0ULL;
+                                _lifecycleColumnBlockN = columnBlockN;
+                                _lifecycleMaxDensity = maxDensity;
+                            }
+                        }
+                        ok = ok
                              && ensureResidentScratch(ResidentLifecycleLookupPair, dLookupPairv,
                                                       numPacketsHost * sizeof(unsigned int),
                                                       "cuMemAlloc(lifecycle lookup pairs)")
                              && (sharedDetectorPlanes
                                  || ensureResidentScratch(ResidentLifecycleDetectorPlane, dDetectorPlanev,
-                                                          detectorPlaneBytes, "cuMemAlloc(lifecycle detector planes)"))
-                             && ensureResidentScratch(ResidentLifecycleNeighborPlaneHalf, dNeighborPlaneHalfv,
-                                                      4 * neighborIndexv.size() * sizeof(float),
-                                                      "cuMemAlloc(lifecycle half neighbor planes)");
+                                                          detectorPlaneBytes, "cuMemAlloc(lifecycle detector planes)"));
                     }
                     if (!ok) return false;
 
-                    int numPackets = static_cast<int>(numPacketsHost);
-                    int numObservers = static_cast<int>(numObserversHost);
                     int sampleEmissionObserver = sampleScatteringObserver ? (stratifySampledObservers ? 2 : 1) : 0;
                     int sampleScatteringObserverFlag = sampleEmissionObserver;
                     int analogTransportFlag = analogTransport ? 1 : 0;
@@ -11860,7 +13434,6 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     // detector kernels: shared transport planes are signalled by a negative face count
                     int detectorNumNeighborPlanes = sharedDetectorPlanes ? -1 : numNeighborPlanes;
                     CUdeviceptr dDetectorPlaneArg = sharedDetectorPlanes ? dNeighborPlaneHalfv : dDetectorPlanev;
-                    int numRadiationFieldValuesInt = static_cast<int>(numRadiationFieldValues);
                     int maxSegments = numCells + 1;
                     int hasSecond = 0;
                     double maxDistance = std::numeric_limits<double>::infinity();
@@ -11872,54 +13445,381 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     unsigned int pathBlockSize = static_cast<unsigned int>(configuredLifecycleBlockSize);
                     unsigned int pathGridSize = static_cast<unsigned int>(
                         (numPacketsHost + pathBlockSize - 1) / pathBlockSize);
+                    CUdeviceptr dInitialActiveIndexv = 0;
+                    int numInitialActivePackets = numPackets;
+                    if (!captureLifecycleProfile(lifecycleSetupMs, true)) return false;
+                    if (earlyWavelengthCull && !inKernelWavelengthCull)
+                    {
+                        void* cullArgs[] = {&dLambdav, &dLuminosityv, &numPackets, &dDetectorDoublev,
+                                            &dDetectorIntv, &dAccumulatorAddressv, &numObservers,
+                                            &dBandOffsetv, &dBandWavelengthv, &dBandTransmissionv,
+                                            &dBandWidthv, &dSedBorderPairv};
+                        if (!check(_cuLaunchKernel(_kernelLifecycleCullUndetectableWavelengths,
+                                                   pathGridSize, 1, 1, pathBlockSize, 1, 1,
+                                                   0, nullptr, cullArgs, nullptr),
+                                   "cuLaunchKernel(lifecycle early wavelength cull)"))
+                            return false;
+                        if (!captureLifecycleProfile(lifecycleEmissionMs, true)) return false;
+                    }
+                    if (earlyWavelengthCull && !asynchronousRounds && !persistentAnalog)
+                    {
+                        constexpr unsigned int compactBlockSize = 256;
+                        unsigned int compactGridSize = static_cast<unsigned int>(
+                            (numPacketsHost + compactBlockSize - 1) / compactBlockSize);
+                        void* compactArgs[] = {&dLuminosityv, &numPackets, &dNull, &numPackets,
+                                               &dActiveIndexv, &dActiveCountv};
+                        ok = check(_cuMemsetD32(dActiveCountv, 0, 1),
+                                   "cuMemsetD32(lifecycle initial active count)")
+                             && check(_cuLaunchKernel(_kernelLifecycleCompactActiveIndices, compactGridSize,
+                                                      1, 1, compactBlockSize, 1, 1, 0, nullptr,
+                                                      compactArgs, nullptr),
+                                      "cuLaunchKernel(lifecycle initial compact active indices)")
+                             && check(_cuCtxSynchronize(), "cuCtxSynchronize")
+                             && check(_cuMemcpyDtoH(&numInitialActivePackets, dActiveCountv,
+                                                    sizeof(numInitialActivePackets)),
+                                      "cuMemcpyDtoH(lifecycle initial active count)");
+                        if (!ok || !captureLifecycleProfile(lifecycleCompactMs, false)
+                            || numInitialActivePackets < 0 || numInitialActivePackets > numPackets)
+                        {
+                            if (ok) _error = "resident lifecycle initial active compaction failed";
+                            return false;
+                        }
+                        dInitialActiveIndexv = dActiveIndexv;
+                    }
                     if (mixedLifecycle)
                     {
-                        int prepareInitialCell = directSourceLaunch && !directDustCellSource ? 1 : 0;
-                        void* lookupArgs[] = {&dLambdav,          &numPackets,
-                                              &dLookupWavelengthv, &sectionLookupBegin,
-                                              &sectionLookupCount, &hgLookupBegin,
-                                              &hgLookupCount,      &dLookupPairv,
-                                              &dSiteFloatv,        &numCells,
-                                              &_voronoiBlockBeginDevice,
-                                              &_voronoiBlockCountDevice,
-                                              &_voronoiBlockIndexDevice,
-                                              &blockN,             &mixedXmax,
-                                              &mixedYmax,          &mixedZmax,
-                                              &xmin,               &ymin,
-                                              &zmin,               &coordinateScale,
-                                              &dPositionv,         &dCellOutv,
-                                              &prepareInitialCell};
-                        if (!check(_cuLaunchKernel(_kernelLifecyclePrepareLookupPairs, pathGridSize, 1, 1,
-                                                   pathBlockSize, 1, 1, 0, nullptr, lookupArgs, nullptr),
-                                   "cuLaunchKernel(lifecycle prepare lookup pairs)"))
-                            return false;
-                        int numDetectorPlanes = numCells * numObservers;
-                        int compactDetectorPlanes = isEnabled("SKIRTGPU_COMPACT_DETECTOR_PLANES", true) ? 1 : 0;
-                        constexpr unsigned int detectorPlaneBlockSize = 256;
-                        unsigned int detectorPlaneGridSize = static_cast<unsigned int>(
-                            (static_cast<size_t>(numDetectorPlanes) + detectorPlaneBlockSize - 1)
-                            / detectorPlaneBlockSize);
-                        void* detectorPlaneArgs[] = {&dNeighborPlanev, &_voronoiNeighborBeginDevice,
-                                                     &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
-                                                     &numNeighborPlanes, &numCells, &dDetectorDoublev, &numObservers,
-                                                     &compactDetectorPlanes, &dDetectorPlanev};
-                        if (!sharedDetectorPlanes
-                            && !check(_cuLaunchKernel(_kernelLifecyclePrepareDetectorPlanes,
-                                                      detectorPlaneGridSize, 1, 1, detectorPlaneBlockSize, 1, 1,
-                                                      0, nullptr, detectorPlaneArgs, nullptr),
-                                      "cuLaunchKernel(lifecycle prepare detector planes)"))
-                            return false;
-                        void* halfPlaneArgs[] = {&dNeighborPlanev, &numNeighborPlanes, &dNeighborPlaneHalfv};
-                        unsigned int halfPlaneGridSize = static_cast<unsigned int>(
-                            (static_cast<size_t>(numNeighborPlanes) + detectorPlaneBlockSize - 1)
-                            / detectorPlaneBlockSize);
-                        if (!check(_cuLaunchKernel(_kernelLifecyclePrepareHalfNeighborPlanes,
-                                                   halfPlaneGridSize, 1, 1, detectorPlaneBlockSize, 1, 1,
-                                                   0, nullptr, halfPlaneArgs, nullptr),
-                                   "cuLaunchKernel(lifecycle prepare half neighbor planes)"))
-                            return false;
+                        if (numInitialActivePackets > 0)
+                        {
+                            int prepareInitialCell = !directDustCellSource ? (hasSourceHintCells ? 2 : 1) : 0;
+                            unsigned int lookupGridSize = static_cast<unsigned int>(
+                                (static_cast<size_t>(numInitialActivePackets) + pathBlockSize - 1) / pathBlockSize);
+                            void* lookupArgs[] = {&dLambdav,             &dLuminosityv,
+                                                  &numPackets,           &dInitialActiveIndexv,
+                                                  &numInitialActivePackets,
+                                                  &dLookupWavelengthv,
+                                                  &sectionLookupBegin,   &sectionLookupCount,
+                                                  &hgLookupBegin,        &hgLookupCount,
+                                                  &dLookupPairv,         &dSiteFloatv,
+                                                  &numCells,             &_voronoiNeighborBeginDevice,
+                                                  &_voronoiNeighborCountDevice,
+                                                  &_voronoiNeighborIndexDevice,
+                                                  &_voronoiBlockBeginDevice,
+                                                  &_voronoiBlockCountDevice,
+                                                  &_voronoiBlockIndexDevice,
+                                                  &blockN,               &mixedXmax,
+                                                  &mixedYmax,            &mixedZmax,
+                                                  &xmin,                 &ymin,
+                                                  &zmin,                 &coordinateScale,
+                                                  &dPositionv,           &dCellOutv,
+                                                  &prepareInitialCell};
+                            if (!check(_cuLaunchKernel(_kernelLifecyclePrepareLookupPairs, lookupGridSize, 1, 1,
+                                                       pathBlockSize, 1, 1, 0, nullptr, lookupArgs, nullptr),
+                                       "cuLaunchKernel(lifecycle prepare lookup pairs)"))
+                                return false;
+                        }
+                        if (!sharedDetectorPlanes)
+                        {
+                            int numDetectorPlanes = numCells * numObservers;
+                            int compactDetectorPlanes = isEnabled("SKIRTGPU_COMPACT_DETECTOR_PLANES", true) ? 1 : 0;
+                            vector<double> detectorDirections(3 * numObserversHost);
+                            for (size_t observer = 0; observer != numObserversHost; ++observer)
+                            {
+                                const double* det = detectorDoublev.data() + detectorDoubleStride * observer;
+                                detectorDirections[3 * observer] = det[0];
+                                detectorDirections[3 * observer + 1] = det[1];
+                                detectorDirections[3 * observer + 2] = det[2];
+                            }
+                            bool cachedDetectorPlanes =
+                                _detectorPlaneGridKey == gridKey
+                                && _detectorPlaneXmin == xmin
+                                && _detectorPlaneYmin == ymin
+                                && _detectorPlaneZmin == zmin
+                                && _detectorPlaneNormalizationSpan == normalizationSpan
+                                && _detectorPlaneNumCells == numCells
+                                && _detectorPlaneNumNeighborPlanes == numNeighborPlanes
+                                && _detectorPlaneCompact == compactDetectorPlanes
+                                && _detectorPlanePtr == dDetectorPlanev
+                                && _detectorPlaneDirections == detectorDirections;
+                            if (!cachedDetectorPlanes)
+                            {
+                                constexpr unsigned int detectorPlaneBlockSize = 256;
+                                unsigned int detectorPlaneGridSize = static_cast<unsigned int>(
+                                    (static_cast<size_t>(numDetectorPlanes) + detectorPlaneBlockSize - 1)
+                                    / detectorPlaneBlockSize);
+                                void* detectorPlaneArgs[] = {
+                                    &dNeighborPlanev, &_voronoiNeighborBeginDevice,
+                                    &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
+                                    &numNeighborPlanes, &numCells, &dDetectorDoublev, &numObservers,
+                                    &compactDetectorPlanes, &dDetectorPlanev};
+                                if (!check(_cuLaunchKernel(_kernelLifecyclePrepareDetectorPlanes,
+                                                           detectorPlaneGridSize, 1, 1, detectorPlaneBlockSize, 1, 1,
+                                                           0, nullptr, detectorPlaneArgs, nullptr),
+                                           "cuLaunchKernel(lifecycle prepare detector planes)"))
+                                    return false;
+                                _detectorPlaneGridKey = gridKey;
+                                _detectorPlaneXmin = xmin;
+                                _detectorPlaneYmin = ymin;
+                                _detectorPlaneZmin = zmin;
+                                _detectorPlaneNormalizationSpan = normalizationSpan;
+                                _detectorPlaneNumCells = numCells;
+                                _detectorPlaneNumNeighborPlanes = numNeighborPlanes;
+                                _detectorPlaneCompact = compactDetectorPlanes;
+                                _detectorPlanePtr = dDetectorPlanev;
+                                _detectorPlaneDirections = std::move(detectorDirections);
+                            }
+                        }
+                        if (isEnabled("SKIRTGPU_DETECTOR_TAU_VOLUME", true) && numObserversHost > 0)
+                        {
+                            int volumeRes = environmentIntValue("SKIRTGPU_DETECTOR_TAU_VOLUME_RES", 256);
+                            if (volumeRes < 32) volumeRes = 32;
+                            if (volumeRes > 512) volumeRes = 512;
+                            int exactSteps = environmentIntValue("SKIRTGPU_DETECTOR_TAU_VOLUME_EXACT_STEPS", 8);
+                            if (exactSteps < 0) exactSteps = 0;
+                            double coreFrac = environmentDoubleValue("SKIRTGPU_DETECTOR_TAU_VOLUME_CORE_FRAC", 0.2);
+                            if (coreFrac < 0.0 || coreFrac >= 1.0) coreFrac = 0.0;
+                            double alphaDu = environmentDoubleValue("SKIRTGPU_DETECTOR_TAU_VOLUME_ALPHA", 1.5);
+                            if (alphaDu <= 0.0) alphaDu = 1.0;
+
+                            vector<double> volumeDirections(3 * numObserversHost);
+                            vector<int> uniqueLeaderForObserver(numObserversHost, -1);
+                            vector<size_t> uniqueObserverLeaders;
+                            for (size_t observer = 0; observer != numObserversHost; ++observer)
+                            {
+                                const double* det = detectorDoublev.data() + detectorDoubleStride * observer;
+                                volumeDirections[3 * observer] = det[0];
+                                volumeDirections[3 * observer + 1] = det[1];
+                                volumeDirections[3 * observer + 2] = det[2];
+                                for (size_t u = 0; u != uniqueObserverLeaders.size(); ++u)
+                                {
+                                    size_t leader = uniqueObserverLeaders[u];
+                                    if (volumeDirections[3 * observer] == volumeDirections[3 * leader]
+                                        && volumeDirections[3 * observer + 1] == volumeDirections[3 * leader + 1]
+                                        && volumeDirections[3 * observer + 2] == volumeDirections[3 * leader + 2])
+                                    {
+                                        uniqueLeaderForObserver[observer] = static_cast<int>(u);
+                                        break;
+                                    }
+                                }
+                                if (uniqueLeaderForObserver[observer] < 0)
+                                {
+                                    uniqueLeaderForObserver[observer] = static_cast<int>(uniqueObserverLeaders.size());
+                                    uniqueObserverLeaders.push_back(observer);
+                                }
+                            }
+                            size_t numUniqueDirs = uniqueObserverLeaders.size();
+                            size_t voxelsPerGrid = static_cast<size_t>(volumeRes) * static_cast<size_t>(volumeRes)
+                                                   * static_cast<size_t>(volumeRes);
+                            bool hasCoreVolume = coreFrac > 0.0;
+                            size_t gridsPerDir = hasCoreVolume ? 2 : 1;
+                            size_t headerFloats = 32 * numObserversHost;
+                            size_t totalVolumeFloats = headerFloats + numUniqueDirs * gridsPerDir * voxelsPerGrid;
+                            size_t totalVolumeBytes = totalVolumeFloats * sizeof(float);
+                            size_t maxVolumeBytes = environmentSizeValue("SKIRTGPU_DETECTOR_TAU_VOLUME_MAX_BYTES",
+                                                                         size_t(2) << 30);
+                            if (totalVolumeBytes <= maxVolumeBytes
+                                && totalVolumeFloats <= static_cast<size_t>(std::numeric_limits<unsigned int>::max()))
+                            {
+                                if (!ensureResidentScratch(ResidentLifecycleDetectorTauVolume, dDetectorTauVolumev,
+                                                           totalVolumeBytes,
+                                                           "cuMemAlloc(lifecycle detector tau volume)"))
+                                    return false;
+                                bool cachedTauVolume =
+                                    _detectorTauVolumeGridKey == gridKey
+                                    && _detectorTauVolumeStateGen == _stateGeneration
+                                    && _detectorTauVolumeDensityOffset == densityOffset
+                                    && _detectorTauVolumeXmin == xmin
+                                    && _detectorTauVolumeYmin == ymin
+                                    && _detectorTauVolumeZmin == zmin
+                                    && _detectorTauVolumeNormalizationSpan == normalizationSpan
+                                    && _detectorTauVolumeRes == volumeRes
+                                    && _detectorTauVolumeExactSteps == exactSteps
+                                    && _detectorTauVolumeCoreFrac == coreFrac
+                                    && _detectorTauVolumeAlpha == alphaDu
+                                    && _detectorTauVolumePtr == dDetectorTauVolumev
+                                    && _detectorTauVolumeDirections == volumeDirections;
+                                if (!cachedTauVolume)
+                                {
+                                    vector<float> headerHost(headerFloats, 0.0f);
+                                    for (size_t observer = 0; observer != numObserversHost; ++observer)
+                                    {
+                                        float* hdr = headerHost.data() + 32 * observer;
+                                        int* hdrInt = reinterpret_cast<int*>(hdr + 24);
+                                        double kxD = volumeDirections[3 * observer];
+                                        double kyD = volumeDirections[3 * observer + 1];
+                                        double kzD = volumeDirections[3 * observer + 2];
+                                        double kNorm = std::sqrt(kxD * kxD + kyD * kyD + kzD * kzD);
+                                        if (!(kNorm > 0.0)) continue;
+                                        kxD /= kNorm;
+                                        kyD /= kNorm;
+                                        kzD /= kNorm;
+                                        double uxD = 0.0, uyD = 0.0, uzD = 0.0;
+                                        if (std::fabs(kxD) < 0.9)
+                                        {
+                                            // cross((1,0,0), k) = (0, -kz, ky)
+                                            uxD = 0.0;
+                                            uyD = -kzD;
+                                            uzD = kyD;
+                                        }
+                                        else
+                                        {
+                                            // cross((0,1,0), k) = (kz, 0, -kx)
+                                            uxD = kzD;
+                                            uyD = 0.0;
+                                            uzD = -kxD;
+                                        }
+                                        double uNorm = std::sqrt(uxD * uxD + uyD * uyD + uzD * uzD);
+                                        uxD /= uNorm;
+                                        uyD /= uNorm;
+                                        uzD /= uNorm;
+                                        // v = cross(k, u)
+                                        double vxD = kyD * uzD - kzD * uyD;
+                                        double vyD = kzD * uxD - kxD * uzD;
+                                        double vzD = kxD * uyD - kyD * uxD;
+
+                                        hdr[0] = static_cast<float>(uxD);
+                                        hdr[1] = static_cast<float>(uyD);
+                                        hdr[2] = static_cast<float>(uzD);
+                                        hdr[3] = static_cast<float>(vxD);
+                                        hdr[4] = static_cast<float>(vyD);
+                                        hdr[5] = static_cast<float>(vzD);
+                                        hdr[6] = static_cast<float>(kxD);
+                                        hdr[7] = static_cast<float>(kyD);
+                                        hdr[8] = static_cast<float>(kzD);
+
+                                        double umin = std::numeric_limits<double>::infinity();
+                                        double umax = -std::numeric_limits<double>::infinity();
+                                        double vmin = std::numeric_limits<double>::infinity();
+                                        double vmax = -std::numeric_limits<double>::infinity();
+                                        double wmin = std::numeric_limits<double>::infinity();
+                                        double wmax = -std::numeric_limits<double>::infinity();
+                                        double bx[2] = {0.0, static_cast<double>(mixedXmax)};
+                                        double by[2] = {0.0, static_cast<double>(mixedYmax)};
+                                        double bz[2] = {0.0, static_cast<double>(mixedZmax)};
+                                        for (int ix = 0; ix != 2; ++ix)
+                                            for (int iy = 0; iy != 2; ++iy)
+                                                for (int iz = 0; iz != 2; ++iz)
+                                                {
+                                                    double uVal = uxD * bx[ix] + uyD * by[iy] + uzD * bz[iz];
+                                                    double vVal = vxD * bx[ix] + vyD * by[iy] + vzD * bz[iz];
+                                                    double wVal = kxD * bx[ix] + kyD * by[iy] + kzD * bz[iz];
+                                                    umin = std::min(umin, uVal);
+                                                    umax = std::max(umax, uVal);
+                                                    vmin = std::min(vmin, vVal);
+                                                    vmax = std::max(vmax, vVal);
+                                                    wmin = std::min(wmin, wVal);
+                                                    wmax = std::max(wmax, wVal);
+                                                }
+                                        double pad = 2.0 * static_cast<double>(mixedEps);
+                                        umin -= pad;
+                                        umax += pad;
+                                        vmin -= pad;
+                                        vmax += pad;
+                                        wmin -= pad;
+                                        wmax += pad;
+                                        double invDu = static_cast<double>(volumeRes - 1) / std::max(1.0e-6, umax - umin);
+                                        double invDv = static_cast<double>(volumeRes - 1) / std::max(1.0e-6, vmax - vmin);
+                                        double invDw = static_cast<double>(volumeRes - 1) / std::max(1.0e-6, wmax - wmin);
+                                        hdr[9] = static_cast<float>(umin);
+                                        hdr[10] = static_cast<float>(vmin);
+                                        hdr[11] = static_cast<float>(wmin);
+                                        hdr[12] = static_cast<float>(invDu);
+                                        hdr[13] = static_cast<float>(invDv);
+                                        hdr[14] = static_cast<float>(invDw);
+
+                                        double smallestVoxel = 1.0 / std::max({invDu, invDv, invDw});
+                                        if (hasCoreVolume)
+                                        {
+                                            double cx = std::max(0.0, std::min(static_cast<double>(mixedXmax),
+                                                                               static_cast<double>(_lifecycleDustCenter[0])));
+                                            double cy = std::max(0.0, std::min(static_cast<double>(mixedYmax),
+                                                                               static_cast<double>(_lifecycleDustCenter[1])));
+                                            double cz = std::max(0.0, std::min(static_cast<double>(mixedZmax),
+                                                                               static_cast<double>(_lifecycleDustCenter[2])));
+                                            double cu0 = uxD * cx + uyD * cy + uzD * cz;
+                                            double cv0 = vxD * cx + vyD * cy + vzD * cz;
+                                            double cw0 = kxD * cx + kyD * cy + kzD * cz;
+                                            double halfSpanU = 0.5 * coreFrac * (umax - umin);
+                                            double halfSpanV = 0.5 * coreFrac * (vmax - vmin);
+                                            double halfSpanW = 0.5 * coreFrac * (wmax - wmin);
+                                            double cumin = cu0 - halfSpanU;
+                                            double cumax = cu0 + halfSpanU;
+                                            double cvmin = cv0 - halfSpanV;
+                                            double cvmax = cv0 + halfSpanV;
+                                            double cwmin = cw0 - halfSpanW;
+                                            double cwmax = cw0 + halfSpanW;
+                                            double cinvDu = static_cast<double>(volumeRes - 1) / std::max(1.0e-6, cumax - cumin);
+                                            double cinvDv = static_cast<double>(volumeRes - 1) / std::max(1.0e-6, cvmax - cvmin);
+                                            double cinvDw = static_cast<double>(volumeRes - 1) / std::max(1.0e-6, cwmax - cwmin);
+                                            hdr[15] = static_cast<float>(cumin);
+                                            hdr[16] = static_cast<float>(cvmin);
+                                            hdr[17] = static_cast<float>(cwmin);
+                                            hdr[18] = static_cast<float>(cinvDu);
+                                            hdr[19] = static_cast<float>(cinvDv);
+                                            hdr[20] = static_cast<float>(cinvDw);
+                                            smallestVoxel = 1.0 / std::max({cinvDu, cinvDv, cinvDw});
+                                        }
+                                        hdr[21] = static_cast<float>(alphaDu * smallestVoxel);
+
+                                        size_t uniqueSlot = static_cast<size_t>(uniqueLeaderForObserver[observer]);
+                                        size_t dirBaseOffset = headerFloats + uniqueSlot * gridsPerDir * voxelsPerGrid;
+                                        hdrInt[0] = static_cast<int>( static_cast<unsigned int>(dirBaseOffset) );
+                                        hdrInt[1] = hasCoreVolume
+                                                        ? static_cast<int>(static_cast<unsigned int>(dirBaseOffset + voxelsPerGrid))
+                                                        : 0;
+                                        hdrInt[2] = volumeRes;
+                                        hdrInt[3] = volumeRes;
+                                        hdrInt[4] = volumeRes;
+                                        hdrInt[5] = exactSteps;
+                                        hdrInt[6] = hasCoreVolume ? 1 : 0;
+                                        hdrInt[7] = 0;
+                                    }
+                                    if (!check(_cuMemcpyHtoD(dDetectorTauVolumev, headerHost.data(),
+                                                             headerFloats * sizeof(float)),
+                                               "cuMemcpyHtoD(detector tau volume headers)"))
+                                        return false;
+                                    constexpr unsigned int volumeBlockSize = 256;
+                                    unsigned int numColumns = static_cast<unsigned int>(volumeRes * volumeRes);
+                                    unsigned int volumeGridX = (numColumns + volumeBlockSize - 1) / volumeBlockSize;
+                                    unsigned int volumeGridY = hasCoreVolume ? 2U : 1U;
+                                    for (size_t u = 0; u != numUniqueDirs; ++u)
+                                    {
+                                        int obsIndex = static_cast<int>(uniqueObserverLeaders[u]);
+                                        void* buildVolArgs[] = {
+                                            &dSiteFloatv,                 &_voronoiNeighborBeginDevice,
+                                            &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
+                                            &dDetectorPlaneArg,           &detectorNumNeighborPlanes,
+                                            &_voronoiBlockBeginDevice,    &_voronoiBlockCountDevice,
+                                            &_voronoiBlockIndexDevice,    &blockN,
+                                            &numCells,                    &mixedEps,
+                                            &mixedXmax,                   &mixedYmax,
+                                            &mixedZmax,                   &dDensityFloatv,
+                                            &obsIndex,                    &dDetectorTauVolumev,
+                                            &dLifecycleStatusv};
+                                        if (!check(_cuLaunchKernel(_kernelLifecycleBuildDetectorTauVolume,
+                                                                   volumeGridX, volumeGridY, 1,
+                                                                   volumeBlockSize, 1, 1, 0, nullptr,
+                                                                   buildVolArgs, nullptr),
+                                                   "cuLaunchKernel(lifecycle build detector tau volume)"))
+                                            return false;
+                                    }
+                                    _detectorTauVolumeGridKey = gridKey;
+                                    _detectorTauVolumeStateGen = _stateGeneration;
+                                    _detectorTauVolumeDensityOffset = densityOffset;
+                                    _detectorTauVolumeXmin = xmin;
+                                    _detectorTauVolumeYmin = ymin;
+                                    _detectorTauVolumeZmin = zmin;
+                                    _detectorTauVolumeNormalizationSpan = normalizationSpan;
+                                    _detectorTauVolumeRes = volumeRes;
+                                    _detectorTauVolumeExactSteps = exactSteps;
+                                    _detectorTauVolumeCoreFrac = coreFrac;
+                                    _detectorTauVolumeAlpha = alphaDu;
+                                    _detectorTauVolumePtr = dDetectorTauVolumev;
+                                    _detectorTauVolumeDirections = std::move(volumeDirections);
+                                }
+                            }
+                        }
                     }
-                    size_t numRaysHost = numPacketsHost * numObserversHost;
+                    size_t numRaysHost = static_cast<size_t>(numInitialActivePackets) * numObserversHost;
                     CUfunction detectorKernel = mixedLifecycle
                                                     ? _kernelVoronoiTableHenyeyGreensteinScatteringDetectorAccumulateMixed
                                                     : _kernelVoronoiTableHenyeyGreensteinScatteringDetectorAccumulate;
@@ -11933,8 +13833,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         return static_cast<unsigned int>((numRays + detectorBlockSize - 1) / detectorBlockSize);
                     };
                     unsigned int detectorGridSize = detectorGridForRays(numRaysHost);
-                    if (!captureLifecycleProfile(lifecycleSetupMs, false)) return false;
-                    CUdeviceptr dEmissionStartCellv = directSourceLaunch ? dCellOutv : dNull;
+                    if (!captureLifecycleProfile(lifecycleSetupMs, true)) return false;
+                    CUdeviceptr dEmissionStartCellv = (mixedLifecycle || directSourceLaunch) ? dCellOutv : dNull;
                     void* emissionDetectorArgs[] = {
                         &_voronoiSiteDevice,          &_voronoiNeighborBeginDevice,
                         &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
@@ -11943,7 +13843,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         &numCells,                    &eps,
                         &dPositionv,                  &dDirectionv,
                         &dLuminosityv,                &numPackets,
-                        &dNull,                       &numPackets,
+                        &dInitialActiveIndexv,        &numInitialActivePackets,
                         &dDetectorDoublev,            &dDetectorIntv,
                         &dAccumulatorAddressv,        &numObservers,
                         &xmin,                        &ymin,
@@ -11972,8 +13872,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         &ymin,                        &zmin,
                         &coordinateScale,             &dPositionv,
                         &dLuminosityv,
-                        &numPackets,                  &dNull,
-                        &numPackets,                  &dEmissionStartCellv,
+                        &numPackets,                  &dInitialActiveIndexv,
+                        &numInitialActivePackets,     &dEmissionStartCellv,
                         &dRngStatev,                  &sampleEmissionObserver,
                         &dDetectorDoublev,            &dDetectorIntv,
                         &dAccumulatorAddressv,        &numObservers,
@@ -11984,7 +13884,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         &sectionLookupCount,
                         &dBandOffsetv,                &dBandWavelengthv,
                         &dBandTransmissionv,          &dBandWidthv,
-                        &dSedBorderPairv,             &dLifecycleStatusv};
+                        &dSedBorderPairv,             &dDetectorTauVolumev,
+                        &dLifecycleStatusv};
                     void* emissionDetectorMixedArgs[] = {
                         &dSiteFloatv,                 &_voronoiNeighborBeginDevice,
                         &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
@@ -11998,8 +13899,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         &ymin,                        &zmin,
                         &coordinateScale,             &dPositionv,
                         &dDirectionv,                 &dLuminosityv,
-                        &numPackets,                  &dNull,
-                        &numPackets,                  &dEmissionStartCellv,
+                        &numPackets,                  &dInitialActiveIndexv,
+                        &numInitialActivePackets,     &dEmissionStartCellv,
                         &dRngStatev,                  &sampleEmissionObserver,
                         &dDetectorDoublev,            &dDetectorIntv,
                         &dAccumulatorAddressv,        &numObservers,
@@ -12011,8 +13912,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         &dZeroAsymmparv,              &dBandOffsetv,
                         &dBandWavelengthv,            &dBandTransmissionv,
                         &dBandWidthv,                 &dSedBorderPairv,
-                        &dLifecycleStatusv};
-                    bool specializedEmissionDetector = mixedLifecycle && (directDustCellSource || movingSources);
+                        &dDetectorTauVolumev,         &dLifecycleStatusv};
+                    bool specializedEmissionDetector = mixedLifecycle;
                     void** emissionDetectorLaunchArgs = specializedEmissionDetector
                                                             ? emissionDetectorSpecializedMixedArgs
                                                             : (mixedLifecycle ? emissionDetectorMixedArgs
@@ -12020,12 +13921,65 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     CUfunction emissionDetectorKernel = specializedEmissionDetector
                                                             ? _kernelVoronoiTableEmissionDetectorAccumulateMixed
                                                             : detectorKernel;
-                    ok = check(_cuLaunchKernel(emissionDetectorKernel, detectorGridSize, 1, 1,
-                                               detectorBlockSize, 1, 1, 0, nullptr,
-                                               emissionDetectorLaunchArgs, nullptr),
-                               "cuLaunchKernel(lifecycle emission detector)");
+                    bool deterministicDirectEmission =
+                        singleSpectrumWindow && directSourceLaunch && !directDustCellSource && mixedLifecycle
+                        && !sampleEmissionObserver && !dEmissionVelocityv
+                        && isEnabled("SKIRTGPU_DETERMINISTIC_DIRECT_EMISSION", false);
+                    if (deterministicDirectEmission)
+                    {
+                        ImportedSourceDeviceCache& sourceCache = _importedSourceCaches[importedSource->cacheToken];
+                        int numEntities = static_cast<int>(importedSource->luminosityWeightv.size());
+                        int numSourceWavelengths = static_cast<int>(importedSource->wavelengthv.size());
+                        int numWindowEntities = static_cast<int>(sourceCache.spectrumEntities);
+                        int numEntitySamples = environmentIntValue("SKIRTGPU_DETERMINISTIC_DIRECT_SAMPLES", 8);
+                        if (numEntitySamples < 1) numEntitySamples = 1;
+                        if (numEntitySamples > 16) numEntitySamples = 16;
+                        unsigned long long firstHistory = static_cast<unsigned long long>(importedFirstHistoryIndex);
+                        size_t numDirectRays = static_cast<size_t>(numWindowEntities) * numObserversHost;
+                        if (numDirectRays > 0)
+                        {
+                            unsigned int directGridSize = detectorGridForRays(numDirectRays);
+                            void* directArgs[] = {
+                                &sourceCache.historyBegin.ptr,       &sourceCache.luminosityWeight.ptr,
+                                &sourceCache.particleCenterSize.ptr, &sourceCache.wavelength.ptr,
+                                &sourceCache.cdf.ptr,                &sourceCache.entityHintCell.ptr,
+                                &numEntities,                        &numSourceWavelengths,
+                                &sourceCache.spectrumFirstEntity,    &numWindowEntities,
+                                &numEntitySamples,                   &firstHistory,
+                                &numPackets,                         &importedLuminosityPerPacket,
+                                &randomSeed,                         &dSiteFloatv,
+                                &_voronoiNeighborBeginDevice,        &_voronoiNeighborCountDevice,
+                                &_voronoiNeighborIndexDevice,        &dDetectorPlaneArg,
+                                &detectorNumNeighborPlanes,          &_voronoiBlockBeginDevice,
+                                &_voronoiBlockCountDevice,           &_voronoiBlockIndexDevice,
+                                &blockN,                             &numCells,
+                                &mixedEps,                           &mixedXmax,
+                                &mixedYmax,                          &mixedZmax,
+                                &xmin,                               &ymin,
+                                &zmin,                               &coordinateScale,
+                                &dDetectorDoublev,                   &dDetectorIntv,
+                                &dAccumulatorAddressv,               &numObservers,
+                                &dDensityFloatv,                     &sectionLookupBegin,
+                                &sectionLookupCount,                 &dLookupWavelengthv,
+                                &dSectionExtv,                       &dBandOffsetv,
+                                &dBandWavelengthv,                   &dBandTransmissionv,
+                                &dBandWidthv,                        &dSedBorderPairv,
+                                &dDetectorTauVolumev,                &dLifecycleStatusv};
+                            ok = check(_cuLaunchKernel(_kernelImportedParticleSourceDeterministicDirectEmission,
+                                                       directGridSize, 1, 1, detectorBlockSize, 1, 1, 0, nullptr,
+                                                       directArgs, nullptr),
+                                       "cuLaunchKernel(imported particle source deterministic direct emission)");
+                        }
+                    }
+                    else if (numInitialActivePackets > 0)
+                    {
+                        ok = check(_cuLaunchKernel(emissionDetectorKernel, detectorGridSize, 1, 1,
+                                                   detectorBlockSize, 1, 1, 0, nullptr,
+                                                   emissionDetectorLaunchArgs, nullptr),
+                                   "cuLaunchKernel(lifecycle emission detector)");
+                    }
                     if (!ok || !captureLifecycleProfile(lifecycleEmissionMs, true)) return false;
-                    if (mixedLifecycle && !numRadiationFieldValuesInt
+                    if (!earlyWavelengthCull && mixedLifecycle && !numRadiationFieldValuesInt
                         && isEnabled("SKIRTGPU_BROADBAND_CULL", true))
                     {
                         // Preserve direct emission, including source Doppler shifts, before deciding
@@ -12040,10 +13994,41 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                    "cuLaunchKernel(lifecycle wavelength cull)");
                         if (!ok || !captureLifecycleProfile(lifecycleEmissionMs, true)) return false;
                     }
+                    if (!dInitialActiveIndexv && mixedLifecycle && !numRadiationFieldValuesInt && !asynchronousRounds
+                        && !persistentAnalog && isEnabled("SKIRTGPU_BROADBAND_CULL", true))
+                    {
+                        constexpr unsigned int compactBlockSize = 256;
+                        unsigned int compactGridSize = static_cast<unsigned int>(
+                            (numPacketsHost + compactBlockSize - 1) / compactBlockSize);
+                        void* compactArgs[] = {&dLuminosityv, &numPackets, &dNull, &numPackets,
+                                               &dActiveIndexv, &dActiveCountv};
+                        ok = check(_cuMemsetD32(dActiveCountv, 0, 1),
+                                   "cuMemsetD32(lifecycle initial active count)")
+                             && check(_cuLaunchKernel(_kernelLifecycleCompactActiveIndices, compactGridSize,
+                                                      1, 1, compactBlockSize, 1, 1, 0, nullptr,
+                                                      compactArgs, nullptr),
+                                      "cuLaunchKernel(lifecycle initial compact active indices)")
+                             && check(_cuCtxSynchronize(), "cuCtxSynchronize")
+                             && check(_cuMemcpyDtoH(&numInitialActivePackets, dActiveCountv,
+                                                    sizeof(numInitialActivePackets)),
+                                      "cuMemcpyDtoH(lifecycle initial active count)");
+                        if (!ok || !captureLifecycleProfile(lifecycleCompactMs, false)
+                            || numInitialActivePackets < 0 || numInitialActivePackets > numPackets)
+                        {
+                            if (ok) _error = "resident lifecycle initial active compaction failed";
+                            return false;
+                        }
+                        dInitialActiveIndexv = dActiveIndexv;
+                    }
                     constexpr size_t maxPropagationRounds = 4096;
                     bool complete = false;
                     bool fusedLifecycleStep = mixedLifecycle;
-                    if (persistentAnalog)
+                    if (numInitialActivePackets == 0)
+                    {
+                        propagationRounds = 0;
+                        complete = true;
+                    }
+                    else if (persistentAnalog)
                     {
                         void* persistentArgs[] = {
                             &dSiteFloatv,                 &_voronoiNeighborBeginDevice,
@@ -12082,10 +14067,6 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     }
                     else if (fusedLifecycleStep)
                     {
-                        if (!directSourceLaunch
-                            && !check(_cuMemsetD32(dCellOutv, 0xffffffffU, numPacketsHost),
-                                      "cuMemsetD32(lifecycle mixed cells)"))
-                            return false;
                         if (asynchronousRounds)
                         {
                             size_t roundsPerCompletionCheck =
@@ -12158,13 +14139,13 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                         &dAsymmparv,                  &dBandOffsetv,
                                         &dBandWavelengthv,             &dBandTransmissionv,
                                         &dBandWidthv,                 &dSedBorderPairv,
-                                        &dLifecycleStatusv};
+                                        &dDetectorTauVolumev,         &dLifecycleStatusv};
                                     void* scatterArgs[] = {
                                         &dDirectionv,     &dLambdav,          &dLuminosityv,
                                         &dRandomCosthetav, &dRandomPhiv,       &dNumScattv,
                                         &numPackets,      &dNull,             &numPackets,
-                                        &hgLookupBegin,   &hgLookupCount,     &dLookupWavelengthv,
-                                        &dAsymmparv};
+                                        &dLookupPairv,    &hgLookupBegin,     &hgLookupCount,
+                                        &dLookupWavelengthv, &dAsymmparv};
                                     ok = check(_cuLaunchKernel(_kernelLifecycleGenerateRandoms,
                                                                pathGridSize, 1, 1, pathBlockSize, 1, 1, 0,
                                                                nullptr, randomArgs, nullptr),
@@ -12188,13 +14169,11 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                 constexpr unsigned int compactBlockSize = 256;
                                 unsigned int compactGridSize = static_cast<unsigned int>(
                                     (numPacketsHost + compactBlockSize - 1) / compactBlockSize);
-                                void* activeResetArgs[] = {&dActiveCountv};
-                                void* compactArgs[] = {&dLuminosityv, &numPackets, &dActiveIndexv,
-                                                       &dActiveCountv};
+                                void* compactArgs[] = {&dLuminosityv, &numPackets, &dNull, &numPackets,
+                                                       &dActiveIndexv, &dActiveCountv};
                                 int numActivePackets = 0;
-                                ok = check(_cuLaunchKernel(_kernelPathCountScanReset, 1, 1, 1, 1, 1, 1,
-                                                           0, nullptr, activeResetArgs, nullptr),
-                                           "cuLaunchKernel(lifecycle asynchronous count reset)")
+                                ok = check(_cuMemsetD32(dActiveCountv, 0, 1),
+                                           "cuMemsetD32(lifecycle asynchronous count reset)")
                                      && check(_cuLaunchKernel(_kernelLifecycleCompactActiveIndices,
                                                               compactGridSize, 1, 1, compactBlockSize, 1, 1,
                                                               0, nullptr, compactArgs, nullptr),
@@ -12215,8 +14194,9 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         }
                         else
                         {
-                        CUdeviceptr dRoundActiveIndexv = 0;
-                        int numRoundActivePackets = numPackets;
+                        CUdeviceptr dRoundActiveIndexv = dInitialActiveIndexv;
+                        CUdeviceptr dNextActiveIndexv = dInitialActiveIndexv ? dActiveIndexAltv : dActiveIndexv;
+                        int numRoundActivePackets = numInitialActivePackets;
                         for (size_t round = 0; round != maxPropagationRounds; ++round)
                         {
                             unsigned int roundGridSize = static_cast<unsigned int>(
@@ -12320,13 +14300,13 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
 
                             constexpr unsigned int compactBlockSize = 256;
                             unsigned int compactGridSize = static_cast<unsigned int>(
-                                (numPacketsHost + compactBlockSize - 1) / compactBlockSize);
-                            void* activeResetArgs[] = {&dActiveCountv};
-                            void* compactArgs[] = {&dLuminosityv, &numPackets, &dActiveIndexv, &dActiveCountv};
+                                (static_cast<size_t>(numRoundActivePackets) + compactBlockSize - 1) / compactBlockSize);
+                            void* compactArgs[] = {&dLuminosityv,          &numPackets,
+                                                   &dRoundActiveIndexv,    &numRoundActivePackets,
+                                                   &dNextActiveIndexv,     &dActiveCountv};
                             int numActivePackets = 0;
-                            ok = check(_cuLaunchKernel(_kernelPathCountScanReset, 1, 1, 1, 1, 1, 1, 0, nullptr,
-                                                       activeResetArgs, nullptr),
-                                       "cuLaunchKernel(lifecycle active count reset)")
+                            ok = check(_cuMemsetD32(dActiveCountv, 0, 1),
+                                       "cuMemsetD32(lifecycle active count reset)")
                                  && check(_cuLaunchKernel(_kernelLifecycleCompactActiveIndices, compactGridSize,
                                                           1, 1, compactBlockSize, 1, 1, 0, nullptr,
                                                           compactArgs, nullptr),
@@ -12346,7 +14326,9 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                 complete = true;
                                 break;
                             }
-                            dRoundActiveIndexv = dActiveIndexv;
+                            CUdeviceptr dCurrentActiveIndexv = dNextActiveIndexv;
+                            dNextActiveIndexv = (dCurrentActiveIndexv == dActiveIndexv) ? dActiveIndexAltv : dActiveIndexv;
+                            dRoundActiveIndexv = dCurrentActiveIndexv;
                             numRoundActivePackets = numActivePackets;
 
                             size_t numActiveRaysHost = static_cast<size_t>(numActivePackets)
@@ -12369,7 +14351,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                 &coordinateScale,
                                 &dPositionv,                  &dDirectionv,
                                 &dLuminosityv,                &numPackets,
-                                &dActiveIndexv,               &numActivePackets,
+                                &dCurrentActiveIndexv,        &numActivePackets,
                                 &dCellOutv,
                                 &dRngStatev,                  &sampleScatteringObserverFlag,
                                 &dDetectorDoublev,            &dDetectorIntv,
@@ -12383,12 +14365,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                 &dAsymmparv,                  &dBandOffsetv,
                                 &dBandWavelengthv,            &dBandTransmissionv,
                                 &dBandWidthv,                 &dSedBorderPairv,
-                                &dLifecycleStatusv};
+                                &dDetectorTauVolumev,         &dLifecycleStatusv};
                             void* scatterArgs[] = {
-                                &dDirectionv,      &dLambdav,          &dLuminosityv, &dRandomCosthetav,
-                                &dRandomPhiv,      &dNumScattv,        &numPackets,    &dActiveIndexv,
-                                &numActivePackets, &hgLookupBegin,     &hgLookupCount, &dLookupWavelengthv,
-                                &dAsymmparv};
+                                &dDirectionv,           &dLambdav,          &dLuminosityv, &dRandomCosthetav,
+                                &dRandomPhiv,           &dNumScattv,        &numPackets,   &dCurrentActiveIndexv,
+                                &numActivePackets,      &dLookupPairv,      &hgLookupBegin, &hgLookupCount,
+                                &dLookupWavelengthv,    &dAsymmparv};
                             ok = check(_cuLaunchKernel(detectorKernel, detectorGridSize, 1, 1,
                                                        detectorBlockSize, 1, 1, 0, nullptr,
                                                        detectorArgs, nullptr),
@@ -12525,12 +14507,11 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         constexpr unsigned int compactBlockSize = 256;
                         unsigned int compactGridSize = static_cast<unsigned int>(
                             (numPacketsHost + compactBlockSize - 1) / compactBlockSize);
-                        void* activeResetArgs[] = {&dActiveCountv};
-                        void* compactArgs[] = {&dLuminosityv, &numPackets, &dActiveIndexv, &dActiveCountv};
+                        void* compactArgs[] = {&dLuminosityv, &numPackets, &dNull, &numPackets,
+                                               &dActiveIndexv, &dActiveCountv};
                         int numActivePackets = 0;
-                        ok = check(_cuLaunchKernel(_kernelPathCountScanReset, 1, 1, 1, 1, 1, 1, 0, nullptr,
-                                                   activeResetArgs, nullptr),
-                                   "cuLaunchKernel(lifecycle active count reset)")
+                        ok = check(_cuMemsetD32(dActiveCountv, 0, 1),
+                                   "cuMemsetD32(lifecycle active count reset)")
                              && check(_cuLaunchKernel(_kernelLifecycleCompactActiveIndices, compactGridSize, 1, 1,
                                                       compactBlockSize, 1, 1, 0, nullptr, compactArgs, nullptr),
                                       "cuLaunchKernel(lifecycle compact active indices)")
@@ -12581,7 +14562,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                             &dLifecycleStatusv};
                         void* scatterArgs[] = {&dDirectionv, &dLambdav, &dLuminosityv, &dRandomCosthetav,
                                                &dRandomPhiv, &dNumScattv, &numPackets, &dActiveIndexv,
-                                               &numActivePackets, &hgLookupBegin, &hgLookupCount,
+                                               &numActivePackets, &dNull, &hgLookupBegin, &hgLookupCount,
                                                &dLookupWavelengthv, &dAsymmparv};
                         ok = check(_cuLaunchKernel(detectorKernel, detectorGridSize, 1, 1,
                                                    detectorBlockSize, 1, 1, 0, nullptr,
@@ -15569,9 +17550,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                 vector<double> wavelengths{xmin};
                 wavelengths.insert(wavelengths.end(), begin, end);
                 wavelengths.push_back(xmax);
-                size_t batchSize = min(numEntities, size_t(1024));
-                if (wavelengths.size() > static_cast<size_t>(std::numeric_limits<int>::max())
-                    || wavelengths.size() > std::numeric_limits<size_t>::max() / batchSize / sizeof(double))
+                if (wavelengths.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
                 {
                     freeAll();
                     return false;
@@ -15581,8 +17560,6 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                 vector<double> logRatio(wavelengths.size() - 1);
                 for (size_t i = 0; i + 1 < wavelengths.size(); ++i) logRatio[i] = std::log(wavelengths[i + 1] / wavelengths[i]);
                 ok = allocateAndCopy(dWavelengths, wavelengths.data(), wavelengths.size() * sizeof(double))
-                     && allocate(dPdfScratch, batchSize * wavelengths.size() * sizeof(double))
-                     && allocate(dLogScratch, batchSize * wavelengths.size() * sizeof(double))
                      && allocateAndCopy(dLogRatio, logRatio.data(), logRatio.size() * sizeof(double));
                 if (ok && quantityLog)
                 {
@@ -15592,22 +17569,18 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     ok = check(_cuLaunchKernel(_kernelSourceSpectrumLogQuantity, blocks, 1, 1, 256, 1, 1, 0,
                                                nullptr, logArgs, nullptr), "source_spectrum_log_quantity");
                 }
-                CUdeviceptr dNoHistories = 0;
-                int fp64Exp = 0;  // luminosities set packet weights and stay double precision throughout
-                for (size_t first = 0; ok && first < numEntities; first += batchSize)
+                if (ok)
                 {
-                    int firstEntity = static_cast<int>(first);
-                    int numRows = static_cast<int>(min(batchSize, numEntities - first));
-                    void* pdfArgs[] = {&dAxisValues, &dAxisOffsets, &dAxisLengths, &dAxisLog, &dQuantity,
-                                       &numAxes, &qtyLog, &clamp, &dParameters, &dWavelengths, &numWavelengths,
-                                       &firstEntity, &numRows, &dPdfScratch, &dNoHistories, &dLogScratch, &fp64Exp};
-                    void* normArgs[] = {&dPdfScratch, &dWavelengths, &numWavelengths, &numRows,
-                                        &firstEntity, &loglog, &dScaleValues, &dLuminosities,
-                                        &dLogScratch, &dLogRatio};
-                    ok = check(_cuLaunchKernel(_kernelSourceSpectrumPdfRows, numRows, 1, 1, 256, 1, 1, 0,
-                                               nullptr, pdfArgs, nullptr), "source_spectrum_pdf_rows")
-                         && check(_cuLaunchKernel(_kernelSourceSpectrumLuminosityRows, numRows, 1, 1, 256, 1, 1, 0,
-                                                  nullptr, normArgs, nullptr), "source_spectrum_luminosity_rows");
+                    int firstEntity = 0;
+                    int numRows = static_cast<int>(numEntities);
+                    unsigned int lumBlocks = static_cast<unsigned int>(min(numEntities, size_t(4096)));
+                    void* fusedArgs[] = {&dAxisValues, &dAxisOffsets, &dAxisLengths, &dAxisLog, &dQuantity,
+                                         &numAxes, &qtyLog, &clamp, &dParameters, &dWavelengths, &numWavelengths,
+                                         &firstEntity, &numRows, &loglog, &dScaleValues, &dLuminosities,
+                                         &dLogRatio};
+                    ok = check(_cuLaunchKernel(_kernelSourceSpectrumLuminosityRowsFused, lumBlocks, 1, 1, 256, 1, 1,
+                                               0, nullptr, fusedArgs, nullptr),
+                               "source_spectrum_luminosity_rows_fused");
                 }
             }
             else
@@ -16863,6 +18836,9 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                    && check(_cuModuleGetFunction(&_kernelLifecyclePrepareDetectorPlanes, _module,
                                                  "lifecycle_prepare_detector_planes"),
                             "cuModuleGetFunction(lifecycle_prepare_detector_planes)")
+                   && check(_cuModuleGetFunction(&_kernelLifecycleBuildDetectorTauVolume, _module,
+                                                 "lifecycle_build_detector_tau_volume"),
+                            "cuModuleGetFunction(lifecycle_build_detector_tau_volume)")
                    && check(_cuModuleGetFunction(&_kernelLifecyclePrepareHalfNeighborPlanes, _module,
                                                  "lifecycle_prepare_half_neighbor_planes"),
                             "cuModuleGetFunction(lifecycle_prepare_half_neighbor_planes)")
@@ -16895,9 +18871,15 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                    && check(_cuModuleGetFunction(&_kernelImportedParticleSourceLaunch, _module,
                                                  "imported_particle_source_launch"),
                             "cuModuleGetFunction(imported_particle_source_launch)")
+                   && check(_cuModuleGetFunction(&_kernelImportedParticleSourcePrepareHintCells, _module,
+                                                 "imported_particle_source_prepare_hint_cells"),
+                            "cuModuleGetFunction(imported_particle_source_prepare_hint_cells)")
                    && check(_cuModuleGetFunction(&_kernelImportedParticleSourceLifecycleInitialize, _module,
                                                  "imported_particle_source_lifecycle_initialize"),
                             "cuModuleGetFunction(imported_particle_source_lifecycle_initialize)")
+                   && check(_cuModuleGetFunction(&_kernelImportedParticleSourceDeterministicDirectEmission, _module,
+                                                 "imported_particle_source_deterministic_direct_emission"),
+                            "cuModuleGetFunction(imported_particle_source_deterministic_direct_emission)")
                    && check(_cuModuleGetFunction(&_kernelDustCellSourceLifecycleInitialize, _module,
                                                  "dust_cell_source_lifecycle_initialize"),
                             "cuModuleGetFunction(dust_cell_source_lifecycle_initialize)")
@@ -16935,6 +18917,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                    && check(_cuModuleGetFunction(&_kernelSourceSpectrumLuminosityRows, _module,
                                                  "source_spectrum_luminosity_rows"),
                             "cuModuleGetFunction(source_spectrum_luminosity_rows)")
+                   && check(_cuModuleGetFunction(&_kernelSourceSpectrumLuminosityRowsFused, _module,
+                                                 "source_spectrum_luminosity_rows_fused"),
+                            "cuModuleGetFunction(source_spectrum_luminosity_rows_fused)")
+                   && check(_cuModuleGetFunction(&_kernelSourceSpectrumBuildRowsFused, _module,
+                                                 "source_spectrum_build_rows_fused"),
+                            "cuModuleGetFunction(source_spectrum_build_rows_fused)")
                    && check(_cuModuleGetFunction(&_kernelSourceSpectrumLogQuantity, _module, "source_spectrum_log_quantity"),
                             "cuModuleGetFunction(source_spectrum_log_quantity)")
                    && check(_cuModuleGetFunction(&_kernelSourceSpectrumPdfRows, _module, "source_spectrum_pdf_rows"),
@@ -17059,6 +19047,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             {
                 if (!check(_cuMemcpyHtoD(_stateDevice, host, bytes), "cuMemcpyHtoD(state)")) return false;
                 _stateDirty = false;
+                ++_stateGeneration;
             }
             return true;
         }
@@ -17145,7 +19134,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             return true;
         }
 
-        bool ensureVoronoiPlanesOnDevice(const void* gridKey, const vector<float>& sitev,
+        bool ensureVoronoiPlanesOnDevice(const void* gridKey, const vector<double>& sitev,
                                          const vector<int>& neighborBeginv, const vector<int>& neighborCountv,
                                          const vector<int>& neighborIndexv, double xmin, double ymin, double zmin,
                                          double normalizationSpan)
@@ -17157,10 +19146,19 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             freeVoronoiPlaneDeviceData();
             size_t numCells = sitev.size() / 3;
             if (sitev.size() != 3 * numCells || neighborBeginv.size() != numCells
-                || neighborCountv.size() != numCells)
+                || neighborCountv.size() != numCells || !(normalizationSpan > 0.0)
+                || !std::isfinite(normalizationSpan))
             {
                 _error = "invalid Voronoi geometry for precomputed GPU planes";
                 return false;
+            }
+
+            vector<float> siteFloatv(sitev.size());
+            for (size_t cell = 0; cell != numCells; ++cell)
+            {
+                siteFloatv[3 * cell] = static_cast<float>((sitev[3 * cell] - xmin) / normalizationSpan);
+                siteFloatv[3 * cell + 1] = static_cast<float>((sitev[3 * cell + 1] - ymin) / normalizationSpan);
+                siteFloatv[3 * cell + 2] = static_cast<float>((sitev[3 * cell + 2] - zmin) / normalizationSpan);
             }
 
             vector<float> planev(4 * neighborIndexv.size(), 0.0f);
@@ -17174,9 +19172,9 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     _error = "invalid Voronoi neighbor range for precomputed GPU planes";
                     return false;
                 }
-                float prx = sitev[3 * cell];
-                float pry = sitev[3 * cell + 1];
-                float prz = sitev[3 * cell + 2];
+                float prx = siteFloatv[3 * cell];
+                float pry = siteFloatv[3 * cell + 1];
+                float prz = siteFloatv[3 * cell + 2];
                 for (int i = 0; i != count; ++i)
                 {
                     size_t slot = static_cast<size_t>(begin + i);
@@ -17187,23 +19185,30 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                         _error = "invalid Voronoi neighbor index for precomputed GPU planes";
                         return false;
                     }
-                    float pix = sitev[3 * neighbor];
-                    float piy = sitev[3 * neighbor + 1];
-                    float piz = sitev[3 * neighbor + 2];
+                    float pix = siteFloatv[3 * neighbor];
+                    float piy = siteFloatv[3 * neighbor + 1];
+                    float piz = siteFloatv[3 * neighbor + 2];
                     float nx = pix - prx;
                     float ny = piy - pry;
                     float nz = piz - prz;
+                    float offset = nx * (0.5f * (pix + prx)) + ny * (0.5f * (piy + pry))
+                                   + nz * (0.5f * (piz + prz));
+                    float maxAbs = std::max(std::max(std::fabs(nx), std::fabs(ny)),
+                                            std::max(std::fabs(nz), std::fabs(offset)));
+                    float scale = maxAbs > 0.0f ? 1.0f / maxAbs : 0.0f;
                     size_t plane = 4 * slot;
-                    planev[plane] = nx;
-                    planev[plane + 1] = ny;
-                    planev[plane + 2] = nz;
-                    planev[plane + 3] = nx * (0.5f * (pix + prx)) + ny * (0.5f * (piy + pry))
-                                        + nz * (0.5f * (piz + prz));
+                    planev[plane] = nx * scale;
+                    planev[plane + 1] = ny * scale;
+                    planev[plane + 2] = nz * scale;
+                    planev[plane + 3] = offset * scale;
                 }
             }
 
-            if (!planev.empty()
-                && !allocateAndCopy(_voronoiNeighborPlaneFloatDevice, planev.data(), planev.size() * sizeof(float)))
+            if ((!siteFloatv.empty()
+                 && !allocateAndCopy(_voronoiSiteFloatDevice, siteFloatv.data(), siteFloatv.size() * sizeof(float)))
+                || (!planev.empty()
+                    && !allocateAndCopy(_voronoiNeighborPlaneFloatDevice, planev.data(),
+                                        planev.size() * sizeof(float))))
             {
                 freeVoronoiPlaneDeviceData();
                 return false;
@@ -17320,13 +19325,17 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
 
         void freeVoronoiPlaneDeviceData()
         {
+            if (_voronoiSiteFloatDevice) _cuMemFree(_voronoiSiteFloatDevice);
             if (_voronoiNeighborPlaneFloatDevice) _cuMemFree(_voronoiNeighborPlaneFloatDevice);
+            _voronoiSiteFloatDevice = 0;
             _voronoiNeighborPlaneFloatDevice = 0;
             _voronoiPlaneKey = nullptr;
             _voronoiPlaneXmin = 0.0;
             _voronoiPlaneYmin = 0.0;
             _voronoiPlaneZmin = 0.0;
             _voronoiPlaneNormalizationSpan = 0.0;
+            _detectorPlaneGridKey = nullptr;
+            _detectorTauVolumeGridKey = nullptr;
         }
 
         void freeTreeDeviceData()
@@ -17363,6 +19372,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             DeviceBuffer historyBegin;
             DeviceBuffer luminosityWeight;
             DeviceBuffer particleCenterSize;
+            DeviceBuffer entityHintCell;
+            const void* hintCellGridKey{nullptr};
+            double hintCellXmin{0.0};
+            double hintCellYmin{0.0};
+            double hintCellZmin{0.0};
+            double hintCellScale{0.0};
             DeviceBuffer cellIndex;
             DeviceBuffer cellExtent;
             DeviceBuffer wavelength;
@@ -17407,6 +19422,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             releaseDeviceBuffer(cache.historyBegin);
             releaseDeviceBuffer(cache.luminosityWeight);
             releaseDeviceBuffer(cache.particleCenterSize);
+            releaseDeviceBuffer(cache.entityHintCell);
+            cache.hintCellGridKey = nullptr;
+            cache.hintCellXmin = 0.0;
+            cache.hintCellYmin = 0.0;
+            cache.hintCellZmin = 0.0;
+            cache.hintCellScale = 0.0;
             releaseDeviceBuffer(cache.cellIndex);
             releaseDeviceBuffer(cache.cellExtent);
             releaseDeviceBuffer(cache.wavelength);
@@ -17443,25 +19464,24 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             const size_t sizeMax = std::numeric_limits<size_t>::max();
             if (entities > intMax || wavelengths > intMax || entities > sizeMax / wavelengths / sizeof(float))
                 return false;
-            vector<double> axes;
-            vector<int> offsets, lengths, logarithmic;
             size_t quantities = 1;
             for (size_t k = 0; k < table.axes.size(); ++k)
             {
                 size_t n = table.axisSizes[k];
-                if (n > intMax || axes.size() > intMax - n || quantities > sizeMax / n) return false;
-                offsets.push_back(static_cast<int>(axes.size()));
-                lengths.push_back(static_cast<int>(n));
-                logarithmic.push_back(table.axisLog[k] ? 1 : 0);
-                axes.insert(axes.end(), table.axes[k], table.axes[k] + n);
+                if (n > intMax || quantities > sizeMax / n) return false;
                 quantities *= n;
             }
             if (quantities > sizeMax / sizeof(double)
                 || quantities > sizeMax / table.quantityStride) return false;
             size_t values = entities * wavelengths;
+            size_t reserveEntities = min(source.luminosityWeightv.size(), entities + entities / 4 + size_t(256));
+            if (reserveEntities > sizeMax / wavelengths / sizeof(float)) reserveEntities = entities;
+            size_t reserveValues = reserveEntities * wavelengths;
             DeviceBuffer& pdf = source.tablePdfBfloat16 ? cache.pdfBfloat16 : cache.pdf;
             size_t pdfBytes = values * (source.tablePdfBfloat16 ? sizeof(unsigned short) : sizeof(float));
             size_t cdfBytes = values * sizeof(float);
+            size_t reservePdfBytes = reserveValues * (source.tablePdfBfloat16 ? sizeof(unsigned short) : sizeof(float));
+            size_t reserveCdfBytes = reserveValues * sizeof(float);
             // high-water buffers: window sizes vary per call, and reallocation would synchronize every launch
             if (pdf.bytes < pdfBytes) releaseDeviceBuffer(pdf);
             if (cache.cdf.bytes < cdfBytes) releaseDeviceBuffer(cache.cdf);
@@ -17473,7 +19493,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                 return true;
             };
             int numAxes = static_cast<int>(table.axes.size()), quantityLog = table.quantityLog ? 1 : 0;
-            int clampFirstAxis = table.clampWavelength ? 1 : 0, loglog = logarithmic[0] && quantityLog;
+            int clampFirstAxis = table.clampWavelength ? 1 : 0, loglog = (table.axisLog[0] ? 1 : 0) && quantityLog;
             int numWavelengths = static_cast<int>(wavelengths);
 
             // Upload (and log-transform) the SED table once per source; window rebuilds then only send the
@@ -17481,9 +19501,21 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             bool ok = true;
             if (cache.tableValues != table.values || cache.tableStride != table.quantityStride
                 || cache.tableQuantities != quantities || cache.tableQuantityLog != table.quantityLog
-                || !cache.tableQuantity.ptr)
+                || !cache.tableQuantity.ptr || cache.logRatio.bytes != (wavelengths - 1) * sizeof(double)
+                || !cache.logRatio.ptr)
             {
                 cache.tableValues = nullptr;
+                vector<double> axes;
+                vector<int> offsets, lengths, logarithmic;
+                for (size_t k = 0; k < table.axes.size(); ++k)
+                {
+                    size_t n = table.axisSizes[k];
+                    if (axes.size() > intMax - n) return false;
+                    offsets.push_back(static_cast<int>(axes.size()));
+                    lengths.push_back(static_cast<int>(n));
+                    logarithmic.push_back(table.axisLog[k] ? 1 : 0);
+                    axes.insert(axes.end(), table.axes[k], table.axes[k] + n);
+                }
                 vector<double> packedQuantity;
                 const double* quantity = table.values;
                 if (table.quantityStride != 1)
@@ -17492,6 +19524,9 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                     for (size_t q = 0; q < quantities; ++q) packedQuantity[q] = table.values[q * table.quantityStride];
                     quantity = packedQuantity.data();
                 }
+                vector<double> logRatio(wavelengths - 1);
+                for (size_t i = 0; i + 1 < wavelengths; ++i)
+                    logRatio[i] = std::log(source.wavelengthv[i + 1] / source.wavelengthv[i]);
                 ok = reserve(cache.tableAxes, axes.size() * sizeof(double))
                      && check(_cuMemcpyHtoD(cache.tableAxes.ptr, axes.data(), axes.size() * sizeof(double)),
                               "cuMemcpyHtoD(source table axes)")
@@ -17506,7 +19541,10 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                               "cuMemcpyHtoD(source table log flags)")
                      && reserve(cache.tableQuantity, quantities * sizeof(double))
                      && check(_cuMemcpyHtoD(cache.tableQuantity.ptr, quantity, quantities * sizeof(double)),
-                              "cuMemcpyHtoD(source table quantity)");
+                              "cuMemcpyHtoD(source table quantity)")
+                     && reserve(cache.logRatio, (wavelengths - 1) * sizeof(double))
+                     && check(_cuMemcpyHtoD(cache.logRatio.ptr, logRatio.data(), (wavelengths - 1) * sizeof(double)),
+                              "cuMemcpyHtoD(source log wavelength ratios)");
                 if (ok && quantityLog)
                 {
                     unsigned long long count = quantities;
@@ -17524,33 +19562,29 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
 
             // Bound transient double-precision storage independently of the entity count.
             int status = 1;
-            vector<double> logRatio(wavelengths - 1);
-            for (size_t i = 0; i + 1 < wavelengths; ++i)
-                logRatio[i] = std::log(source.wavelengthv[i + 1] / source.wavelengthv[i]);
             // SKIRTGPU_SOURCE_SPECTRA_FP32=1 evaluates exponentials in FP32 relative to each row's maximum. The
             // cache stores normalized float/bfloat16 rows, so this loses little, but rows then differ from CPU-built
             // spectra in the last bit; it saved only ~6% of halo-0 primary emission, so it is opt-in.
             int floatExp = isEnabled("SKIRTGPU_SOURCE_SPECTRA_FP32", false) ? 1 : 0;
-            size_t batchSize = min(entities, size_t(256));
-            if (wavelengths > sizeMax / batchSize / sizeof(double)) return false;
-            size_t scratchBytes = batchSize * wavelengths * sizeof(double);
+            size_t scratchRows = floatExp ? min(entities, size_t(256)) : min(entities, size_t(340));
+            if (wavelengths > sizeMax / scratchRows / sizeof(double)) return false;
+            size_t scratchBytes = scratchRows * wavelengths * sizeof(double);
             size_t parameterBytes = entities * (table.axes.size() - 1) * sizeof(double);
-            ok = (pdf.ptr || allocate(pdf.ptr, pdfBytes)) && (cache.cdf.ptr || allocate(cache.cdf.ptr, cdfBytes))
-                 && reserve(cache.windowParameters, parameterBytes)
+            size_t reserveParameterBytes = reserveEntities * (table.axes.size() - 1) * sizeof(double);
+            ok = (pdf.ptr || allocate(pdf.ptr, reservePdfBytes))
+                 && (cache.cdf.ptr || allocate(cache.cdf.ptr, reserveCdfBytes))
+                 && reserve(cache.windowParameters, max(parameterBytes, reserveParameterBytes))
                  && check(_cuMemcpyHtoD(cache.windowParameters.ptr,
                                         table.parameters.data() + windowFirst * (table.axes.size() - 1),
                                         parameterBytes), "cuMemcpyHtoD(source window parameters)")
                  && reserve(cache.pdfScratch, scratchBytes) && reserve(cache.cdfScratch, scratchBytes)
-                 && reserve(cache.logScratch, scratchBytes)
-                 && reserve(cache.logRatio, (wavelengths - 1) * sizeof(double))
-                 && check(_cuMemcpyHtoD(cache.logRatio.ptr, logRatio.data(), (wavelengths - 1) * sizeof(double)),
-                          "cuMemcpyHtoD(source log wavelength ratios)")
+                 && (!floatExp || reserve(cache.logScratch, scratchBytes))
                  && reserve(cache.status, sizeof(int))
                  && check(_cuMemcpyHtoD(cache.status.ptr, &status, sizeof(int)), "cuMemcpyHtoD(source status)");
             if (ok)
             {
-                pdf.bytes = max(pdf.bytes, pdfBytes);
-                cache.cdf.bytes = max(cache.cdf.bytes, cdfBytes);
+                pdf.bytes = max(pdf.bytes, reservePdfBytes);
+                cache.cdf.bytes = max(cache.cdf.bytes, reserveCdfBytes);
             }
             CUdeviceptr dAxes = cache.tableAxes.ptr, dOffsets = cache.tableOffsets.ptr;
             CUdeviceptr dLengths = cache.tableLengths.ptr, dLog = cache.tableLog.ptr;
@@ -17559,20 +19593,37 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             CUdeviceptr dStatus = cache.status.ptr;
             CUdeviceptr dLogScratch = cache.logScratch.ptr, dLogRatio = cache.logRatio.ptr;
             CUdeviceptr dHistories = cache.historyBegin.ptr + windowFirst * sizeof(unsigned long long);
-            for (size_t first = 0; ok && first < entities; first += batchSize)
+            if (!floatExp)
             {
-                int firstEntity = static_cast<int>(first), numRows = static_cast<int>(min(batchSize, entities - first));
-                void* pdfArgs[] = {&dAxes, &dOffsets, &dLengths, &dLog, &dQuantity, &numAxes, &quantityLog,
-                                   &clampFirstAxis, &dParameters, &cache.wavelength.ptr, &numWavelengths,
-                                   &firstEntity, &numRows, &dPdfScratch, &dHistories, &dLogScratch, &floatExp};
-                void* normalizeArgs[] = {&dPdfScratch, &cache.wavelength.ptr, &numWavelengths, &numRows,
-                                         &firstEntity, &loglog, &dCdfScratch, &cache.pdf.ptr,
-                                         &cache.pdfBfloat16.ptr, &cache.cdf.ptr, &dStatus, &dHistories,
-                                         &dLogScratch, &dLogRatio};
-                ok = check(_cuLaunchKernel(_kernelSourceSpectrumPdfRows, numRows, 1, 1, 256, 1, 1, 0,
-                                           nullptr, pdfArgs, nullptr), "source_spectrum_pdf_rows")
-                     && check(_cuLaunchKernel(_kernelSourceSpectrumNormalizeRows, numRows, 1, 1, 256, 1, 1, 0,
-                                              nullptr, normalizeArgs, nullptr), "source_spectrum_normalize_rows");
+                int firstEntity = 0;
+                int numRows = static_cast<int>(entities);
+                unsigned int buildBlocks = static_cast<unsigned int>(scratchRows);
+                void* fusedArgs[] = {&dAxes, &dOffsets, &dLengths, &dLog, &dQuantity, &numAxes, &quantityLog,
+                                     &clampFirstAxis, &dParameters, &cache.wavelength.ptr, &numWavelengths,
+                                     &firstEntity, &numRows, &loglog, &dPdfScratch, &dCdfScratch,
+                                     &cache.pdf.ptr, &cache.pdfBfloat16.ptr, &cache.cdf.ptr, &dStatus,
+                                     &dHistories, &dLogRatio};
+                ok = ok && check(_cuLaunchKernel(_kernelSourceSpectrumBuildRowsFused, buildBlocks, 1, 1, 256, 1, 1,
+                                                 0, nullptr, fusedArgs, nullptr),
+                                 "source_spectrum_build_rows_fused");
+            }
+            else
+            {
+                for (size_t first = 0; ok && first < entities; first += scratchRows)
+                {
+                    int firstEntity = static_cast<int>(first), numRows = static_cast<int>(min(scratchRows, entities - first));
+                    void* pdfArgs[] = {&dAxes, &dOffsets, &dLengths, &dLog, &dQuantity, &numAxes, &quantityLog,
+                                       &clampFirstAxis, &dParameters, &cache.wavelength.ptr, &numWavelengths,
+                                       &firstEntity, &numRows, &dPdfScratch, &dHistories, &dLogScratch, &floatExp};
+                    void* normalizeArgs[] = {&dPdfScratch, &cache.wavelength.ptr, &numWavelengths, &numRows,
+                                             &firstEntity, &loglog, &dCdfScratch, &cache.pdf.ptr,
+                                             &cache.pdfBfloat16.ptr, &cache.cdf.ptr, &dStatus, &dHistories,
+                                             &dLogScratch, &dLogRatio};
+                    ok = check(_cuLaunchKernel(_kernelSourceSpectrumPdfRows, numRows, 1, 1, 256, 1, 1, 0,
+                                               nullptr, pdfArgs, nullptr), "source_spectrum_pdf_rows")
+                         && check(_cuLaunchKernel(_kernelSourceSpectrumNormalizeRows, numRows, 1, 1, 256, 1, 1, 0,
+                                                  nullptr, normalizeArgs, nullptr), "source_spectrum_normalize_rows");
+                }
             }
             ok = ok && check(_cuCtxSynchronize(), "synchronize device source spectra")
                  && check(_cuMemcpyDtoH(&status, dStatus, sizeof(int)), "read device source spectrum status");
@@ -17654,8 +19705,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
         // A source can contain millions of particles. Cache at most a bounded interval of
         // entity rows; split initialization at history boundaries while preserving global RNG keys.
         bool prepareImportedSpectrumWindow(const GpuSourceLaunchData& source, ImportedSourceDeviceCache& cache,
-                                            unsigned long long firstHistory, size_t remainingPackets,
-                                            int& windowPackets)
+                                           unsigned long long firstHistory, size_t remainingPackets,
+                                           int& windowPackets)
         {
             windowPackets = static_cast<int>(remainingPackets);
             if (!source.spectrumTable.values) return true;
@@ -17668,21 +19719,24 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             if (upper == source.historyBeginv.begin() || upper == source.historyBeginv.end()) return false;
             size_t entity = static_cast<size_t>(upper - source.historyBeginv.begin() - 1);
 
-            // reuse the cached rows when they contain this call's first entity
+            unsigned long long lastHistory = firstHistory + remainingPackets - 1;
+            auto lastUpper = std::upper_bound(source.historyBeginv.begin(), source.historyBeginv.end(), lastHistory);
+            size_t lastEntity = static_cast<size_t>(lastUpper - source.historyBeginv.begin() - 1);
+            size_t neededEntities = min(entities, lastEntity + 1) - entity;
+
+            // reuse the cached rows when they cover this call (or when this call exceeds cache capacity anyway)
             size_t cachedFirst = static_cast<size_t>(cache.spectrumFirstEntity), cachedCount = cache.spectrumEntities;
             if (cachedCount && entity >= cachedFirst && entity < cachedFirst + cachedCount)
             {
                 unsigned long long histories = source.historyBeginv[cachedFirst + cachedCount] - firstHistory;
-                windowPackets = static_cast<int>(min(static_cast<unsigned long long>(remainingPackets), histories));
-                return windowPackets > 0;
+                if (histories >= remainingPackets || neededEntities > capacity)
+                {
+                    windowPackets = static_cast<int>(min(static_cast<unsigned long long>(remainingPackets), histories));
+                    return windowPackets > 0;
+                }
             }
 
-            // otherwise build only the entities this call needs, up to the cache capacity; concurrent feeders on
-            // one GPU work on nearby history ranges, and fixed aligned windows made them rebuild unneeded rows
-            unsigned long long lastHistory = firstHistory + remainingPackets - 1;
-            auto lastUpper = std::upper_bound(source.historyBeginv.begin(), source.historyBeginv.end(), lastHistory);
-            size_t lastEntity = static_cast<size_t>(lastUpper - source.historyBeginv.begin() - 1);
-            size_t first = entity, count = min(capacity, min(entities, lastEntity + 1) - first);
+            size_t first = entity, count = min(capacity, neededEntities);
             unsigned long long histories = source.historyBeginv[first + count] - firstHistory;
             windowPackets = static_cast<int>(min(static_cast<unsigned long long>(remainingPackets), histories));
             if (windowPackets <= 0) return false;
@@ -17884,12 +19938,38 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
         void releaseResidentScratch(int slot, CUdeviceptr& ptr)
         {
             releaseDeviceBuffer(_residentScratch[slot]);
+            _residentScratchShadow[slot].clear();
             ptr = 0;
         }
 
         bool copyResidentScratch(int slot, CUdeviceptr& ptr, const void* host, size_t bytes, const char* label)
         {
+            _residentScratchShadow[slot].clear();
             return ensureResidentScratch(slot, ptr, bytes, label) && (!bytes || check(_cuMemcpyHtoD(ptr, host, bytes), label));
+        }
+
+        bool copyResidentScratchCached(int slot, CUdeviceptr& ptr, const void* host, size_t bytes, const char* label)
+        {
+            if (!bytes)
+            {
+                ptr = 0;
+                return true;
+            }
+            vector<unsigned char>& shadow = _residentScratchShadow[slot];
+            if (_residentScratch[slot].ptr && _residentScratch[slot].bytes >= bytes && shadow.size() == bytes
+                && std::memcmp(shadow.data(), host, bytes) == 0)
+            {
+                ptr = _residentScratch[slot].ptr;
+                return true;
+            }
+            if (!ensureResidentScratch(slot, ptr, bytes, label) || !check(_cuMemcpyHtoD(ptr, host, bytes), label))
+            {
+                shadow.clear();
+                return false;
+            }
+            shadow.resize(bytes);
+            std::memcpy(shadow.data(), host, bytes);
+            return true;
         }
 
         bool check(CUresult result, const char* call)
@@ -17962,6 +20042,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             ResidentLifecycleNumScatt,
             ResidentLifecycleStatus,
             ResidentLifecycleActiveIndex,
+            ResidentLifecycleActiveIndexAlt,
             ResidentLifecycleActiveCount,
             ResidentLifecycleMaxDistance,
             ResidentLifecycleZeroAsymmpar,
@@ -17971,6 +20052,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             ResidentLambda,
             ResidentLifecycleLookupPair,
             ResidentLifecycleDetectorPlane,
+            ResidentLifecycleDetectorTauVolume,
             ResidentLifecycleNeighborPlaneHalf,
             ResidentLifecycleBlockMaxDensity,
             ResidentDensityOffset,
@@ -18002,6 +20084,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
         };
 
         std::array<DeviceBuffer, ResidentScratchCount> _residentScratch;
+        std::array<vector<unsigned char>, ResidentScratchCount> _residentScratchShadow;
 
         void* _cuda{nullptr};
         void* _nvrtc{nullptr};
@@ -18104,6 +20187,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                 CUfunction _kernelLifecycleGenerateRandomsActive{nullptr};
                 CUfunction _kernelLifecyclePrepareLookupPairs{nullptr};
                 CUfunction _kernelLifecyclePrepareDetectorPlanes{nullptr};
+                CUfunction _kernelLifecycleBuildDetectorTauVolume{nullptr};
                 CUfunction _kernelLifecyclePrepareHalfNeighborPlanes{nullptr};
                 CUfunction _kernelLifecycleVoronoiAnalogStepMixed{nullptr};
                 CUfunction _kernelLifecycleVoronoiAnalogRfStepMixed{nullptr};
@@ -18116,7 +20200,9 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                 CUfunction _kernelLifecycleHenyeyGreensteinScatter{nullptr};
 			        CUfunction _kernelIsotropicDirections{nullptr};
                 CUfunction _kernelImportedParticleSourceLaunch{nullptr};
+                CUfunction _kernelImportedParticleSourcePrepareHintCells{nullptr};
                 CUfunction _kernelImportedParticleSourceLifecycleInitialize{nullptr};
+                CUfunction _kernelImportedParticleSourceDeterministicDirectEmission{nullptr};
                 CUfunction _kernelDustCellSourceLifecycleInitialize{nullptr};
         CUfunction _kernelDustAbsorbedLuminosity{nullptr};
         CUfunction _kernelStochasticDustEmission{nullptr};
@@ -18133,6 +20219,8 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
         CUfunction _kernelEmittingCellCounts{nullptr};
         CUfunction _kernelCompositeLaunchWeights{nullptr};
         CUfunction _kernelSourceSpectrumLuminosityRows{nullptr};
+        CUfunction _kernelSourceSpectrumLuminosityRowsFused{nullptr};
+        CUfunction _kernelSourceSpectrumBuildRowsFused{nullptr};
         CUfunction _kernelSourceSpectrumLogQuantity{nullptr};
         CUfunction _kernelSourceSpectrumPdfRows{nullptr};
         CUfunction _kernelSourceSpectrumNormalizeRows{nullptr};
@@ -18143,6 +20231,17 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
         size_t _stateBytes{0};
         CUdeviceptr _stateDevice{0};
         bool _stateDirty{true};
+        uint64_t _stateGeneration{0};
+        uint64_t _lifecycleDensityStateGen{0};
+        const void* _lifecycleDensityGridKey{nullptr};
+        int _lifecycleDensityNumCells{0};
+        int _lifecycleDensityOffset{-1};
+        bool _lifecycleBlockColumnBound{false};
+        bool _lifecycleBlockDustSource{false};
+        unsigned long long _lifecycleBlockSourceToken{0};
+        int _lifecycleColumnBlockN{0};
+        float _lifecycleMaxDensity{0.0f};
+        float _lifecycleDustCenter[3]{0.5f, 0.5f, 0.5f};
 
         const void* _treeKey{nullptr};
         size_t _treeNodeBytes{0};
@@ -18190,7 +20289,31 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
         CUdeviceptr _voronoiBlockBeginDevice{0};
         CUdeviceptr _voronoiBlockCountDevice{0};
         CUdeviceptr _voronoiBlockIndexDevice{0};
+        CUdeviceptr _voronoiSiteFloatDevice{0};
         CUdeviceptr _voronoiNeighborPlaneFloatDevice{0};
+        const void* _detectorPlaneGridKey{nullptr};
+        double _detectorPlaneXmin{0.0};
+        double _detectorPlaneYmin{0.0};
+        double _detectorPlaneZmin{0.0};
+        double _detectorPlaneNormalizationSpan{0.0};
+        int _detectorPlaneNumCells{0};
+        int _detectorPlaneNumNeighborPlanes{0};
+        int _detectorPlaneCompact{-1};
+        CUdeviceptr _detectorPlanePtr{0};
+        vector<double> _detectorPlaneDirections;
+        const void* _detectorTauVolumeGridKey{nullptr};
+        uint64_t _detectorTauVolumeStateGen{0};
+        int _detectorTauVolumeDensityOffset{-1};
+        double _detectorTauVolumeXmin{0.0};
+        double _detectorTauVolumeYmin{0.0};
+        double _detectorTauVolumeZmin{0.0};
+        double _detectorTauVolumeNormalizationSpan{0.0};
+        int _detectorTauVolumeRes{0};
+        int _detectorTauVolumeExactSteps{0};
+        double _detectorTauVolumeCoreFrac{0.0};
+        double _detectorTauVolumeAlpha{0.0};
+        CUdeviceptr _detectorTauVolumePtr{0};
+        vector<double> _detectorTauVolumeDirections;
     };
 
     bool useAllCudaDevices()

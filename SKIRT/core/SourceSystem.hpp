@@ -145,7 +145,7 @@ public:
     /** This function exposes prepared GPU metadata and the effective packet luminosity when the
         complete history-index range maps to one supported source and no launch callback is installed. */
     bool gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData, double& luminosityPerPacket,
-                             size_t firstHistoryIndex, size_t numPackets) const;
+                             size_t firstHistoryIndex, size_t numPackets, size_t* spanPackets = nullptr) const;
 
     //======================== Data Members ========================
 

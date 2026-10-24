@@ -209,23 +209,27 @@ bool SecondarySourceSystem::launchBatchData(vector<double>& packetData, size_t f
 
 bool SecondarySourceSystem::gpuSourceLaunchData(const GpuSourceLaunchData*& sourceData,
                                                 double& luminosityPerPacket, size_t firstHistoryIndex,
-                                                size_t numPackets) const
+                                                size_t numPackets, size_t* spanPackets) const
 {
     sourceData = nullptr;
     luminosityPerPacket = 0.;
+    if (spanPackets) *spanPackets = 0;
     if (!numPackets || !_callbackv.empty() || _Iv.size() < 2
         || firstHistoryIndex > std::numeric_limits<size_t>::max() - numPackets)
         return false;
 
     size_t s = static_cast<size_t>(std::upper_bound(_Iv.cbegin(), _Iv.cend(), firstHistoryIndex) - _Iv.cbegin() - 1);
-    if (s >= _sources.size() || firstHistoryIndex > std::numeric_limits<size_t>::max() - numPackets
-        || firstHistoryIndex + numPackets > _Iv[s + 1])
+    if (s >= _sources.size() || firstHistoryIndex >= _Iv[s + 1]
+        || (!spanPackets && firstHistoryIndex + numPackets > _Iv[s + 1]))
         return false;
     sourceData = _sources[s]->gpuSourceLaunchData();
     if (!sourceData) return false;
 
     luminosityPerPacket = _Lpp * _Lv[s] / _Wv[s];
-    return std::isfinite(luminosityPerPacket) && luminosityPerPacket > 0.;
+    if (!(std::isfinite(luminosityPerPacket) && luminosityPerPacket > 0.))
+        return false;
+    if (spanPackets) *spanPackets = std::min(numPackets, _Iv[s + 1] - firstHistoryIndex);
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////

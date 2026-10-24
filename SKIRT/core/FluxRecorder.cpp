@@ -105,17 +105,29 @@ namespace
                && std::strcmp(value, "no") != 0 && std::strcmp(value, "NO") != 0;
     }
 
+    bool gpuCalibrateArrayEnabled()
+    {
+        const char* value = std::getenv("SKIRTGPU_GPU_CALIBRATE_ARRAY");
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0
+               && std::strcmp(value, "FALSE") != 0 && std::strcmp(value, "off") != 0
+               && std::strcmp(value, "OFF") != 0 && std::strcmp(value, "no") != 0
+               && std::strcmp(value, "NO") != 0;
+    }
+
     void scaleWavelengthArray(Array& array, const vector<double>& factorv)
     {
         if (!array.size()) return;
-        if (GpuAcceleration::scaleWavelengthValues(&array[0], factorv.size(), factorv)) return;
+        if (gpuCalibrateArrayEnabled() && GpuAcceleration::scaleWavelengthValues(&array[0], factorv.size(), factorv))
+            return;
         for (size_t ell = 0; ell != factorv.size(); ++ell) array[ell] *= factorv[ell];
     }
 
     void scaleFrameWavelengthArray(Array& array, size_t numPixelsInFrame, const vector<double>& factorv)
     {
         if (!array.size()) return;
-        if (GpuAcceleration::scaleFrameWavelengthValues(&array[0], factorv.size(), numPixelsInFrame, factorv)) return;
+        if (gpuCalibrateArrayEnabled()
+            && GpuAcceleration::scaleFrameWavelengthValues(&array[0], factorv.size(), numPixelsInFrame, factorv))
+            return;
         for (size_t ell = 0; ell != factorv.size(); ++ell)
         {
             double factor = factorv[ell];
@@ -129,7 +141,7 @@ namespace
                          const Array* value4)
     {
         result.resize(value1.size());
-        if (value1.size()
+        if (gpuCalibrateArrayEnabled() && value1.size()
             && GpuAcceleration::sumValues(&result[0], result.size(), &value1[0], &value2[0],
                                           value3 && value3->size() ? &(*value3)[0] : nullptr,
                                           value4 && value4->size() ? &(*value4)[0] : nullptr))

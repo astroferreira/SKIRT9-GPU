@@ -736,3 +736,16 @@ the 1000x production target.
   already GPU-backed for dust and gas sources.
 - Add CPU/GPU parity tests for SEDs and datacubes across no-medium, extinction-only, dust emission,
   gas emission, and dust-and-gas emission modes.
+
+## Broadband and multi-camera optimization pass (2026-10-23)
+
+See `Docs/BROADBAND_OPTIMIZATION_20261023.md` for full details and per-stage profiling tables. Key additions:
+- **Tier 0**: Cross-wave device scratch caching (`copyResidentScratchCached`), unified Voronoi plane buffer, top-hat/binary-search band transmission, pre-trace spatial/spectral culling (`skirt_detector_prepare_slot`), warp-aggregated active compaction (`__ballot_sync` + `__popc`), Round-0 compaction, FP32 HG phase evaluation, and analog Russian roulette.
+- **Tier 1A**: Hybrid 2-level nested observer optical-depth volumes (`SKIRTGPU_DETECTOR_TAU_VOLUME=1`, default on) combining exact local Voronoi cell traversal (`maxExactSteps = 8`, `s >= 1.5 * du`) with $O(1)$ trilinear remaining-column-density lookup.
+- **Tier 1B**: Delaunay greedy neighbor walk (`skirt_voronoi_find_cell_walk_float`), vectorized `float4` plane loads and division-free ray-plane intersection, division-free early-exit majorant DDA with periodic mid-ray column pruning, source-boundary wave splitting (`spanPackets`), and single-feeder sequential wave submission.
+- **Tier 1C**: Single-launch shared-memory + warp-shuffle fused source spectrum kernels (`source_spectrum_luminosity_rows_fused`, `source_spectrum_build_rows_fused`), precomputed particle center Voronoi hint cells (`imported_particle_source_prepare_hint_cells`), and in-kernel early wavelength culling + pre-emission active compaction.
+- **Tier 2**: Voro++ `c_loop_all`-ordered parallel Voronoi verification and parallel $64^3$ search-block construction in `VoronoiMeshSnapshot.cpp`, elimination of redundant HtoD/DtoH calibration round-trips in `FluxRecorder.cpp` (`SKIRTGPU_GPU_CALIBRATE_ARRAY=0` default), and opt-in deterministic direct stellar emission (`SKIRTGPU_DETERMINISTIC_DIRECT_EMISSION=1`).
+- **Measured speedups on single RTX 5090**:
+  - `snap99_640113_1e8` (5 Frame instruments, $10^8$ packets): wall time `5.7595 s -> 2.6043 s` (**2.21× faster**), primary emission `4.121 s -> 1.230 s` (**3.35× faster**), GPU kernel total `4173.40 ms -> 1183.14 ms` (**3.53× faster**), peak host RAM `980 MB -> 634 MB` (**-35.3%**), max band flux diff `0.083%`.
+  - `snap99_640113_cube25` (10 cameras × 25 bands at $800\times800$, $10^8$ packets): wall time `10.4859 s -> 3.8143 s` (**2.75× faster** default) / `3.7255 s` (**2.81× faster** with `SKIRTGPU_DETERMINISTIC_DIRECT_EMISSION=1`), primary emission `8.125 s -> 1.838 s` (**4.42× faster** default) / `1.701 s` (**4.78× faster** deterministic direct), GPU kernel total `7870.24 ms -> 1796.95 ms` (**4.38× faster** default) / `1658.70 ms` (**4.74× faster** deterministic direct).
+
