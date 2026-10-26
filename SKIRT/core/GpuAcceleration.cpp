@@ -3648,6 +3648,7 @@ static __device__ float skirt_voronoi_trace_total_float(
     float rx = static_cast<float>((positionv[positionBase] - xminPhysical) * coordinateScale);
     float ry = static_cast<float>((positionv[positionBase + 1] - yminPhysical) * coordinateScale);
     float rz = static_cast<float>((positionv[positionBase + 2] - zminPhysical) * coordinateScale);
+    float maxDistance = static_cast<float>(maxDistancePhysical * coordinateScale);
     if (detectorTauVolumev && observerIndex >= 0 && !(maxDistancePhysical < 1.0e300))
     {
         const float* header = detectorTauVolumev + 32 * observerIndex;
@@ -3659,51 +3660,65 @@ static __device__ float skirt_voronoi_trace_total_float(
             float u0 = ux * rx + uy * ry + uz * rz;
             float v0 = vx * rx + vy * ry + vz * rz;
             int maxExactSteps = headerInt[5];
-            if (maxExactSteps <= 0)
+            if (maxExactSteps < 0)
+            {
+                int Nu = headerInt[2];
+                int Nv = headerInt[3];
+                int iu = static_cast<int>(floorf((u0 - header[9]) * header[12]));
+                int iv = static_cast<int>(floorf((v0 - header[10]) * header[13]));
+                if (iu < 0 || iu >= Nu || iv < 0 || iv >= Nv) return 0.0f;
+                float w0 = kx * rx + ky * ry + kz * rz;
+                float wMax = detectorTauVolumev[static_cast<unsigned int>(headerInt[0]) + iu * Nv + iv];
+                if (!(w0 < wMax)) return 0.0f;
+                maxDistance = fminf(maxDistance, wMax - w0);
+            }
+            else if (maxExactSteps == 0)
             {
                 float w0 = kx * rx + ky * ry + kz * rz;
                 return sectionExtScaled
                        * skirt_detector_tau_volume_sample(detectorTauVolumev, header, headerInt, u0, v0, w0);
             }
-            SkirtVoronoiRayStateFloat ray;
-            if (!skirt_voronoi_ray_start_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv,
-                                               blockN, eps, rx, ry, rz, kx, ky, kz, xmax, ymax, zmax,
-                                               initialCell, &ray))
-                return 0.0f;
-            float alphaDu = header[21];
-            float localColumn = 0.0f;
-            int cell = -1;
-            float ds = 0.0f;
-            bool exitedBox = false;
-            for (int step = 0; step < maxExactSteps; ++step)
+            else
             {
-                bool hasNext =
-                    sharedPlanes
-                        ? skirt_voronoi_ray_next_plane_float(
-                              sitev, neighborBeginv, neighborCountv, neighborIndexv, detectorPlanev,
-                              blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax,
-                              zmax, &ray, &cell, &ds, statusOut)
-                        : skirt_voronoi_ray_next_detector_plane_float(
-                              sitev, neighborBeginv, neighborCountv, neighborIndexv, detectorPlanev,
-                              blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax,
-                              zmax, &ray, &cell, &ds, statusOut);
-                if (!hasNext)
+                SkirtVoronoiRayStateFloat ray;
+                if (!skirt_voronoi_ray_start_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv,
+                                                   blockN, eps, rx, ry, rz, kx, ky, kz, xmax, ymax, zmax,
+                                                   initialCell, &ray))
+                    return 0.0f;
+                float alphaDu = header[21];
+                float localColumn = 0.0f;
+                int cell = -1;
+                float ds = 0.0f;
+                bool exitedBox = false;
+                for (int step = 0; step < maxExactSteps; ++step)
                 {
-                    exitedBox = true;
-                    break;
+                    bool hasNext =
+                        sharedPlanes
+                            ? skirt_voronoi_ray_next_plane_float(
+                                  sitev, neighborBeginv, neighborCountv, neighborIndexv, detectorPlanev,
+                                  blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax,
+                                  zmax, &ray, &cell, &ds, statusOut)
+                            : skirt_voronoi_ray_next_detector_plane_float(
+                                  sitev, neighborBeginv, neighborCountv, neighborIndexv, detectorPlanev,
+                                  blockBeginv, blockCountv, blockIndexv, blockN, numCells, eps, xmax, ymax,
+                                  zmax, &ray, &cell, &ds, statusOut);
+                    if (!hasNext)
+                    {
+                        exitedBox = true;
+                        break;
+                    }
+                    localColumn += densityv[cell] * ds;
+                    if (densityv[cell] > 0.0f && ds >= alphaDu) break;
                 }
-                localColumn += densityv[cell] * ds;
-                if (ds >= alphaDu) break;
+                if (statusOut[0] != 1) return 0.0f;
+                if (exitedBox || ray.cell < 0) return sectionExtScaled * localColumn;
+                float w = kx * ray.rx + ky * ray.ry + kz * ray.rz;
+                float remColumn =
+                    skirt_detector_tau_volume_sample(detectorTauVolumev, header, headerInt, u0, v0, w);
+                return sectionExtScaled * (localColumn + remColumn);
             }
-            if (statusOut[0] != 1) return 0.0f;
-            if (exitedBox || ray.cell < 0) return sectionExtScaled * localColumn;
-            float w = kx * ray.rx + ky * ray.ry + kz * ray.rz;
-            float remColumn =
-                skirt_detector_tau_volume_sample(detectorTauVolumev, header, headerInt, u0, v0, w);
-            return sectionExtScaled * (localColumn + remColumn);
         }
     }
-    float maxDistance = static_cast<float>(maxDistancePhysical * coordinateScale);
     SkirtVoronoiRayStateFloat ray;
     if (!skirt_voronoi_ray_start_float(sitev, numCells, blockBeginv, blockCountv, blockIndexv, blockN,
                                         eps, rx, ry, rz, kx, ky, kz, xmax, ymax, zmax, initialCell, &ray))
@@ -8250,8 +8265,14 @@ static __device__ SkirtImportedSourcePacket skirt_sample_imported_particle_sourc
     double luminosityPerPacket, unsigned long long randomSeed)
 {
     SkirtImportedSourcePacket packet = {};
-    int first = 0;
-    int len = numEntities + 1;
+    int first = (spectrumFirstEntity > 0 && spectrumFirstEntity <= numEntities
+                 && !(historyIndex < historyBeginv[spectrumFirstEntity]))
+                    ? spectrumFirstEntity
+                    : 0;
+    int len = numEntities + 1 - first;
+    int windowCap = first + 131072;
+    if (windowCap < numEntities && historyIndex < historyBeginv[windowCap])
+        len = windowCap + 1 - first;
     while (len > 0)
     {
         int half = len >> 1;
@@ -8423,8 +8444,14 @@ extern "C" __global__ void imported_particle_source_lifecycle_initialize(
     if (packetIndex >= numPackets) return;
 
     unsigned long long historyIndex = firstHistoryIndex + static_cast<unsigned long long>(packetIndex);
-    int first = 0;
-    int len = numEntities + 1;
+    int first = (spectrumFirstEntity > 0 && spectrumFirstEntity <= numEntities
+                 && !(historyIndex < historyBeginv[spectrumFirstEntity]))
+                    ? spectrumFirstEntity
+                    : 0;
+    int len = numEntities + 1 - first;
+    int windowCap = first + 131072;
+    if (windowCap < numEntities && historyIndex < historyBeginv[windowCap])
+        len = windowCap + 1 - first;
     while (len > 0)
     {
         int half = len >> 1;
@@ -12844,17 +12871,30 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                             const double* stateData = state.data();
                             int numStateVars = state.numVars();
                             double sumRho = 0.0, sumRhoX = 0.0, sumRhoY = 0.0, sumRhoZ = 0.0;
+                            double centerX = 0.5 * static_cast<double>(mixedXmax);
+                            double centerY = 0.5 * static_cast<double>(mixedYmax);
+                            double centerZ = 0.5 * static_cast<double>(mixedZmax);
                             for (int cell = 0; cell != numCells; ++cell)
                             {
                                 float rho = static_cast<float>(stateData[cell * numStateVars + densityOffset]);
                                 densityFloatv[cell] = rho;
                                 if (rho > 0.0f)
                                 {
-                                    double w = static_cast<double>(rho);
-                                    sumRho += w;
-                                    sumRhoX += w * ((sitev[3 * static_cast<size_t>(cell)] - xmin) / maxSpan);
-                                    sumRhoY += w * ((sitev[3 * static_cast<size_t>(cell) + 1] - ymin) / maxSpan);
-                                    sumRhoZ += w * ((sitev[3 * static_cast<size_t>(cell) + 2] - zmin) / maxSpan);
+                                    double nx = (sitev[3 * static_cast<size_t>(cell)] - xmin) / maxSpan;
+                                    double ny = (sitev[3 * static_cast<size_t>(cell) + 1] - ymin) / maxSpan;
+                                    double nz = (sitev[3 * static_cast<size_t>(cell) + 2] - zmin) / maxSpan;
+                                    double dx = nx - centerX;
+                                    double dy = ny - centerY;
+                                    double dz = nz - centerZ;
+                                    double r2 = dx * dx + dy * dy + dz * dz;
+                                    if (r2 <= 0.01)
+                                    {
+                                        double w = static_cast<double>(rho);
+                                        sumRho += w;
+                                        sumRhoX += w * nx;
+                                        sumRhoY += w * ny;
+                                        sumRhoZ += w * nz;
+                                    }
                                 }
                             }
                             if (sumRho > 0.0)
@@ -13154,7 +13194,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                             }
                             else
                             {
-                                if (ok && mixedLifecycle && sourceCache.particleCenterSize.ptr && numEntities > 0)
+                                bool worthwhileHintCells =
+                                    !importedSource->historyBeginv.empty()
+                                    && importedSource->historyBeginv.back()
+                                           >= 4ULL * static_cast<unsigned long long>(numEntities);
+                                if (ok && mixedLifecycle && worthwhileHintCells
+                                    && sourceCache.particleCenterSize.ptr && numEntities > 0)
                                 {
                                     size_t hintBytes = static_cast<size_t>(numEntities) * sizeof(int);
                                     bool cachedHints =
@@ -13568,14 +13613,22 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                 _detectorPlaneDirections = std::move(detectorDirections);
                             }
                         }
-                        if (isEnabled("SKIRTGPU_DETECTOR_TAU_VOLUME", true) && numObserversHost > 0)
+                        bool defaultTauVolume = numCells <= 500000;
+                        bool useTauVolume = isEnabled("SKIRTGPU_DETECTOR_TAU_VOLUME", defaultTauVolume);
+                        bool useWmaxBound = !useTauVolume && blockColumnBound && columnBlockN > 0
+                                            && isEnabled("SKIRTGPU_DETECTOR_WMAX_BOUND", true);
+                        if ((useTauVolume || useWmaxBound) && numObserversHost > 0)
                         {
                             int volumeRes = environmentIntValue("SKIRTGPU_DETECTOR_TAU_VOLUME_RES", 256);
                             if (volumeRes < 32) volumeRes = 32;
                             if (volumeRes > 512) volumeRes = 512;
-                            int exactSteps = environmentIntValue("SKIRTGPU_DETECTOR_TAU_VOLUME_EXACT_STEPS", 8);
-                            if (exactSteps < 0) exactSteps = 0;
-                            double coreFrac = environmentDoubleValue("SKIRTGPU_DETECTOR_TAU_VOLUME_CORE_FRAC", 0.2);
+                            int exactSteps = useWmaxBound
+                                                 ? -1
+                                                 : environmentIntValue("SKIRTGPU_DETECTOR_TAU_VOLUME_EXACT_STEPS", 8);
+                            if (!useWmaxBound && exactSteps < 0) exactSteps = 0;
+                            double coreFrac = useWmaxBound
+                                                  ? 0.0
+                                                  : environmentDoubleValue("SKIRTGPU_DETECTOR_TAU_VOLUME_CORE_FRAC", 0.2);
                             if (coreFrac < 0.0 || coreFrac >= 1.0) coreFrac = 0.0;
                             double alphaDu = environmentDoubleValue("SKIRTGPU_DETECTOR_TAU_VOLUME_ALPHA", 1.5);
                             if (alphaDu <= 0.0) alphaDu = 1.0;
@@ -13607,9 +13660,11 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                 }
                             }
                             size_t numUniqueDirs = uniqueObserverLeaders.size();
-                            size_t voxelsPerGrid = static_cast<size_t>(volumeRes) * static_cast<size_t>(volumeRes)
-                                                   * static_cast<size_t>(volumeRes);
-                            bool hasCoreVolume = coreFrac > 0.0;
+                            size_t voxelsPerGrid = useWmaxBound
+                                                       ? (static_cast<size_t>(volumeRes) * static_cast<size_t>(volumeRes))
+                                                       : (static_cast<size_t>(volumeRes) * static_cast<size_t>(volumeRes)
+                                                          * static_cast<size_t>(volumeRes));
+                            bool hasCoreVolume = !useWmaxBound && coreFrac > 0.0;
                             size_t gridsPerDir = hasCoreVolume ? 2 : 1;
                             size_t headerFloats = 32 * numObserversHost;
                             size_t totalVolumeFloats = headerFloats + numUniqueDirs * gridsPerDir * voxelsPerGrid;
@@ -13773,34 +13828,119 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                                         hdrInt[6] = hasCoreVolume ? 1 : 0;
                                         hdrInt[7] = 0;
                                     }
-                                    if (!check(_cuMemcpyHtoD(dDetectorTauVolumev, headerHost.data(),
-                                                             headerFloats * sizeof(float)),
-                                               "cuMemcpyHtoD(detector tau volume headers)"))
-                                        return false;
-                                    constexpr unsigned int volumeBlockSize = 256;
-                                    unsigned int numColumns = static_cast<unsigned int>(volumeRes * volumeRes);
-                                    unsigned int volumeGridX = (numColumns + volumeBlockSize - 1) / volumeBlockSize;
-                                    unsigned int volumeGridY = hasCoreVolume ? 2U : 1U;
-                                    for (size_t u = 0; u != numUniqueDirs; ++u)
+                                    if (useWmaxBound)
                                     {
-                                        int obsIndex = static_cast<int>(uniqueObserverLeaders[u]);
-                                        void* buildVolArgs[] = {
-                                            &dSiteFloatv,                 &_voronoiNeighborBeginDevice,
-                                            &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
-                                            &dDetectorPlaneArg,           &detectorNumNeighborPlanes,
-                                            &_voronoiBlockBeginDevice,    &_voronoiBlockCountDevice,
-                                            &_voronoiBlockIndexDevice,    &blockN,
-                                            &numCells,                    &mixedEps,
-                                            &mixedXmax,                   &mixedYmax,
-                                            &mixedZmax,                   &dDensityFloatv,
-                                            &obsIndex,                    &dDetectorTauVolumev,
-                                            &dLifecycleStatusv};
-                                        if (!check(_cuLaunchKernel(_kernelLifecycleBuildDetectorTauVolume,
-                                                                   volumeGridX, volumeGridY, 1,
-                                                                   volumeBlockSize, 1, 1, 0, nullptr,
-                                                                   buildVolArgs, nullptr),
-                                                   "cuLaunchKernel(lifecycle build detector tau volume)"))
+                                        vector<float> hostBlockMax;
+                                        const vector<float>* blockMaxPtr = &blockMaxDensityv;
+                                        size_t numColBlocks = static_cast<size_t>(columnBlockN)
+                                                              * static_cast<size_t>(columnBlockN)
+                                                              * static_cast<size_t>(columnBlockN);
+                                        if (blockMaxPtr->size() != numColBlocks)
+                                        {
+                                            hostBlockMax.resize(numColBlocks, 0.0f);
+                                            if (!check(_cuMemcpyDtoH(hostBlockMax.data(), dBlockMaxDensityv,
+                                                                     numColBlocks * sizeof(float)),
+                                                       "cuMemcpyDtoH(block max density for wmax bound)"))
+                                                return false;
+                                            blockMaxPtr = &hostBlockMax;
+                                        }
+                                        vector<float> fullVolumeHost(totalVolumeFloats, -1.0e30f);
+                                        std::memcpy(fullVolumeHost.data(), headerHost.data(),
+                                                    headerFloats * sizeof(float));
+                                        double dxB = static_cast<double>(mixedXmax) / static_cast<double>(columnBlockN);
+                                        double dyB = static_cast<double>(mixedYmax) / static_cast<double>(columnBlockN);
+                                        double dzB = static_cast<double>(mixedZmax) / static_cast<double>(columnBlockN);
+                                        double padB = 4.0 * static_cast<double>(mixedEps) + 1.0e-5;
+                                        double hxB = 0.5 * dxB + padB;
+                                        double hyB = 0.5 * dyB + padB;
+                                        double hzB = 0.5 * dzB + padB;
+                                        vector<size_t> dustyBlocks;
+                                        for (size_t b = 0; b != numColBlocks; ++b)
+                                        {
+                                            if ((*blockMaxPtr)[b] > 0.0f) dustyBlocks.push_back(b);
+                                        }
+                                        size_t cN = static_cast<size_t>(columnBlockN);
+                                        for (size_t u = 0; u != numUniqueDirs; ++u)
+                                        {
+                                            size_t obs = uniqueObserverLeaders[u];
+                                            const float* hdr = headerHost.data() + 32 * obs;
+                                            const int* hdrInt = reinterpret_cast<const int*>(hdr + 24);
+                                            float* grid = fullVolumeHost.data() + static_cast<unsigned int>(hdrInt[0]);
+                                            double uxD = hdr[0], uyD = hdr[1], uzD = hdr[2];
+                                            double vxD = hdr[3], vyD = hdr[4], vzD = hdr[5];
+                                            double kxD = hdr[6], kyD = hdr[7], kzD = hdr[8];
+                                            double umin = hdr[9], vmin = hdr[10];
+                                            double invDu = hdr[12], invDv = hdr[13];
+                                            double ru = std::fabs(uxD) * hxB + std::fabs(uyD) * hyB + std::fabs(uzD) * hzB;
+                                            double rv = std::fabs(vxD) * hxB + std::fabs(vyD) * hyB + std::fabs(vzD) * hzB;
+                                            double rw = std::fabs(kxD) * hxB + std::fabs(kyD) * hyB + std::fabs(kzD) * hzB;
+                                            for (size_t b : dustyBlocks)
+                                            {
+                                                size_t bi = b / (cN * cN);
+                                                size_t rem = b - bi * (cN * cN);
+                                                size_t bj = rem / cN;
+                                                size_t bk = rem - bj * cN;
+                                                double xc = (static_cast<double>(bi) + 0.5) * dxB;
+                                                double yc = (static_cast<double>(bj) + 0.5) * dyB;
+                                                double zc = (static_cast<double>(bk) + 0.5) * dzB;
+                                                double uc = uxD * xc + uyD * yc + uzD * zc;
+                                                double vc = vxD * xc + vyD * yc + vzD * zc;
+                                                double wc = kxD * xc + kyD * yc + kzD * zc;
+                                                int iu0 = std::max(0, std::min(volumeRes - 1,
+                                                    static_cast<int>(std::floor((uc - ru - umin) * invDu)) - 1));
+                                                int iu1 = std::max(0, std::min(volumeRes - 1,
+                                                    static_cast<int>(std::floor((uc + ru - umin) * invDu)) + 1));
+                                                int iv0 = std::max(0, std::min(volumeRes - 1,
+                                                    static_cast<int>(std::floor((vc - rv - vmin) * invDv)) - 1));
+                                                int iv1 = std::max(0, std::min(volumeRes - 1,
+                                                    static_cast<int>(std::floor((vc + rv - vmin) * invDv)) + 1));
+                                                float wBlockMax = static_cast<float>(wc + rw);
+                                                for (int iu = iu0; iu <= iu1; ++iu)
+                                                {
+                                                    float* row = grid + iu * volumeRes;
+                                                    for (int iv = iv0; iv <= iv1; ++iv)
+                                                    {
+                                                        if (wBlockMax > row[iv]) row[iv] = wBlockMax;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if (!check(_cuMemcpyHtoD(dDetectorTauVolumev, fullVolumeHost.data(),
+                                                                 totalVolumeBytes),
+                                                   "cuMemcpyHtoD(detector wmax bounds)"))
                                             return false;
+                                    }
+                                    else
+                                    {
+                                        if (!check(_cuMemcpyHtoD(dDetectorTauVolumev, headerHost.data(),
+                                                                 headerFloats * sizeof(float)),
+                                                   "cuMemcpyHtoD(detector tau volume headers)"))
+                                            return false;
+                                        constexpr unsigned int volumeBlockSize = 256;
+                                        unsigned int numColumns = static_cast<unsigned int>(volumeRes * volumeRes);
+                                        unsigned int volumeGridX = (numColumns + volumeBlockSize - 1) / volumeBlockSize;
+                                        unsigned int volumeGridY = hasCoreVolume ? 2U : 1U;
+                                        for (size_t u = 0; u != numUniqueDirs; ++u)
+                                        {
+                                            int obsIndex = static_cast<int>(uniqueObserverLeaders[u]);
+                                            void* buildVolArgs[] = {
+                                                &dSiteFloatv,                 &_voronoiNeighborBeginDevice,
+                                                &_voronoiNeighborCountDevice, &_voronoiNeighborIndexDevice,
+                                                &dDetectorPlaneArg,           &detectorNumNeighborPlanes,
+                                                &_voronoiBlockBeginDevice,    &_voronoiBlockCountDevice,
+                                                &_voronoiBlockIndexDevice,    &blockN,
+                                                &numCells,                    &mixedEps,
+                                                &mixedXmax,                   &mixedYmax,
+                                                &mixedZmax,                   &dDensityFloatv,
+                                                &obsIndex,                    &dDetectorTauVolumev,
+                                                &dLifecycleStatusv};
+                                            if (!check(_cuLaunchKernel(_kernelLifecycleBuildDetectorTauVolume,
+                                                                       volumeGridX, volumeGridY, 1,
+                                                                       volumeBlockSize, 1, 1, 0, nullptr,
+                                                                       buildVolArgs, nullptr),
+                                                       "cuLaunchKernel(lifecycle build detector tau volume)"))
+                                                return false;
+                                        }
                                     }
                                     _detectorTauVolumeGridKey = gridKey;
                                     _detectorTauVolumeStateGen = _stateGeneration;
@@ -17573,7 +17713,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                 {
                     int firstEntity = 0;
                     int numRows = static_cast<int>(numEntities);
-                    unsigned int lumBlocks = static_cast<unsigned int>(min(numEntities, size_t(4096)));
+                    unsigned int lumBlocks = static_cast<unsigned int>(min(numEntities, size_t(16384)));
                     void* fusedArgs[] = {&dAxisValues, &dAxisOffsets, &dAxisLengths, &dAxisLog, &dQuantity,
                                          &numAxes, &qtyLog, &clamp, &dParameters, &dWavelengths, &numWavelengths,
                                          &firstEntity, &numRows, &loglog, &dScaleValues, &dLuminosities,
@@ -19474,7 +19614,12 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             if (quantities > sizeMax / sizeof(double)
                 || quantities > sizeMax / table.quantityStride) return false;
             size_t values = entities * wavelengths;
-            size_t reserveEntities = min(source.luminosityWeightv.size(), entities + entities / 4 + size_t(256));
+            size_t rowBytes = wavelengths
+                              * (sizeof(float) + (source.tablePdfBfloat16 ? sizeof(unsigned short) : sizeof(float)));
+            size_t budget = environmentSizeValue("SKIRTGPU_SOURCE_CACHE_BYTES", size_t(2) << 30);
+            size_t capacity = min(source.luminosityWeightv.size(), max(size_t(1), budget / max(size_t(1), rowBytes)));
+            size_t reserveEntities = min(source.luminosityWeightv.size(),
+                                         max(capacity, entities + entities / 4 + size_t(256)));
             if (reserveEntities > sizeMax / wavelengths / sizeof(float)) reserveEntities = entities;
             size_t reserveValues = reserveEntities * wavelengths;
             DeviceBuffer& pdf = source.tablePdfBfloat16 ? cache.pdfBfloat16 : cache.pdf;
@@ -19483,10 +19628,13 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             size_t reservePdfBytes = reserveValues * (source.tablePdfBfloat16 ? sizeof(unsigned short) : sizeof(float));
             size_t reserveCdfBytes = reserveValues * sizeof(float);
             // high-water buffers: window sizes vary per call, and reallocation would synchronize every launch
+            if ((pdf.ptr && pdf.bytes < pdfBytes) || (cache.cdf.ptr && cache.cdf.bytes < cdfBytes))
+                _cuCtxSynchronize();
             if (pdf.bytes < pdfBytes) releaseDeviceBuffer(pdf);
             if (cache.cdf.bytes < cdfBytes) releaseDeviceBuffer(cache.cdf);
             auto reserve = [this](DeviceBuffer& buffer, size_t bytes) {
                 if (buffer.ptr && buffer.bytes >= bytes) return true;
+                if (buffer.ptr) _cuCtxSynchronize();
                 releaseDeviceBuffer(buffer);
                 if (!allocate(buffer.ptr, bytes)) return false;
                 buffer.bytes = bytes;
@@ -19566,9 +19714,11 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
             // cache stores normalized float/bfloat16 rows, so this loses little, but rows then differ from CPU-built
             // spectra in the last bit; it saved only ~6% of halo-0 primary emission, so it is opt-in.
             int floatExp = isEnabled("SKIRTGPU_SOURCE_SPECTRA_FP32", false) ? 1 : 0;
-            size_t scratchRows = floatExp ? min(entities, size_t(256)) : min(entities, size_t(340));
-            if (wavelengths > sizeMax / scratchRows / sizeof(double)) return false;
-            size_t scratchBytes = scratchRows * wavelengths * sizeof(double);
+            bool regScratch = !floatExp && wavelengths <= 4096;
+            size_t scratchRows = floatExp ? min(entities, size_t(256))
+                                          : (regScratch ? min(entities, size_t(16384)) : min(entities, size_t(2048)));
+            if (!regScratch && wavelengths > sizeMax / scratchRows / sizeof(double)) return false;
+            size_t scratchBytes = regScratch ? 0 : (scratchRows * wavelengths * sizeof(double));
             size_t parameterBytes = entities * (table.axes.size() - 1) * sizeof(double);
             size_t reserveParameterBytes = reserveEntities * (table.axes.size() - 1) * sizeof(double);
             ok = (pdf.ptr || allocate(pdf.ptr, reservePdfBytes))
@@ -19577,7 +19727,7 @@ extern "C" __global__ void stored_table_sample_wavelength_batch(
                  && check(_cuMemcpyHtoD(cache.windowParameters.ptr,
                                         table.parameters.data() + windowFirst * (table.axes.size() - 1),
                                         parameterBytes), "cuMemcpyHtoD(source window parameters)")
-                 && reserve(cache.pdfScratch, scratchBytes) && reserve(cache.cdfScratch, scratchBytes)
+                 && (regScratch || (reserve(cache.pdfScratch, scratchBytes) && reserve(cache.cdfScratch, scratchBytes)))
                  && (!floatExp || reserve(cache.logScratch, scratchBytes))
                  && reserve(cache.status, sizeof(int))
                  && check(_cuMemcpyHtoD(cache.status.ptr, &status, sizeof(int)), "cuMemcpyHtoD(source status)");

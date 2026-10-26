@@ -100,17 +100,43 @@ static __device__ double skirt_source_spectrum_pdf(
     return quantityLog ? exp(y) : y;
 }
 
-// Power-law segment area from the log-pdf difference dy = ln(p1/p0) and lnx = ln(x1/x0); see skirt_powerlaw_area.
-static __device__ double skirt_powerlaw_area_logs(double p0, double p1, double x0, double x1, double lnx, double dy)
+static __device__ __forceinline__ double skirt_fast_exp_double(double y, const double* sExp2Table)
 {
-    double q = 1.0 + dy / lnx;
-    if (q == 0.0) return p0 * x0 * lnx;
-    if (fabs(q) < 1e-3)
+    if (!(y > -700.0)) return y < -708.3964185322641 ? 0.0 : exp(y);
+    if (!(y < 700.0)) return exp(y);
+    constexpr double invLn2_64 = 92.33248261689365689295;
+    constexpr double magic = 6755399441055744.0;
+    constexpr double ln2_64_hi = 0.010830424696223417;
+    constexpr double ln2_64_lo = 2.572804622327669e-14;
+    double kd = __fma_rn(y, invLn2_64, magic);
+    long long m = __double_as_longlong(kd);
+    kd -= magic;
+    double r = __fma_rn(-kd, ln2_64_hi, y);
+    r = __fma_rn(-kd, ln2_64_lo, r);
+    double poly = __fma_rn(r, 1.0 / 24.0, 1.0 / 6.0);
+    poly = __fma_rn(r, poly, 0.5);
+    poly = __fma_rn(r, poly, 1.0);
+    poly = __fma_rn(r, poly, 1.0);
+    double scaled = poly * sExp2Table[static_cast<int>(m) & 63];
+    return __longlong_as_double(__double_as_longlong(scaled) + ((m >> 6) << 52));
+}
+
+// Power-law segment area from the log-pdf difference dy = ln(p1/p0) and lnx = ln(x1/x0); see skirt_powerlaw_area.
+static __device__ __forceinline__ double skirt_powerlaw_area_logs(double p0, double p1, double x0, double x1,
+                                                                  double lnx, double dy)
+{
+    double s = lnx + dy;
+    if (fabs(s) < 1e-3 * fabs(lnx))
     {
-        double s = q * lnx;
         return p0 * x0 * (lnx * (1.0 + 0.5 * s + 1.0 / 6.0 * s * s + 1.0 / 24.0 * s * s * s));
     }
-    return (x1 * p1 - x0 * p0) / q;
+    if (fabs(s) > 1.0e-30 && fabs(s) < 1.0e30)
+    {
+        double invS = static_cast<double>(__fdividef(1.0f, static_cast<float>(s)));
+        invS = __fma_rn(invS, __fma_rn(-s, invS, 1.0), invS);
+        return (x1 * p1 - x0 * p0) * (lnx * invS);
+    }
+    return ((x1 * p1 - x0 * p0) * lnx) / s;
 }
 
 // Segment area for row integrals; uses the stored log-pdf and log wavelength ratio when available.
@@ -384,6 +410,79 @@ extern "C" __global__ void source_spectrum_normalize_rows(
     }
 }
 
+static __device__ void skirt_source_endpoint_axis(
+    const double* firstAxis, int firstLength, int firstAxisLog, int clampFirstAxis, double x,
+    int* rightOut, double* fractionOut, int* validOut)
+{
+    int right = skirt_lower_bound_double(firstAxis, firstLength, x);
+    if (right == 0)
+    {
+        if (!clampFirstAxis && x != firstAxis[0])
+        {
+            *rightOut = 1;
+            *fractionOut = 0.0;
+            *validOut = 0;
+            return;
+        }
+        right++;
+        x = firstAxis[0];
+    }
+    else if (right == firstLength)
+    {
+        if (!clampFirstAxis)
+        {
+            *rightOut = firstLength - 1;
+            *fractionOut = 1.0;
+            *validOut = 0;
+            return;
+        }
+        right--;
+        x = firstAxis[right];
+    }
+    double x1 = firstAxis[right - 1];
+    double x2 = firstAxis[right];
+    if (firstAxisLog)
+    {
+        x = log(x);
+        x1 = log(x1);
+        x2 = log(x2);
+    }
+    *rightOut = right;
+    *fractionOut = (x - x1) / (x2 - x1);
+    *validOut = 1;
+}
+
+static __device__ double skirt_source_endpoint_value(
+    const double* quantity, int quantityLog, const unsigned long long* activeBases,
+    const double* activeWeights, int numActive, int right, double fraction, int valid)
+{
+    double zero = quantityLog ? skirt_source_negative_infinity() : 0.0;
+    if (!valid) return zero;
+    double y = 0.0;
+    double negativeInfinity = skirt_source_negative_infinity();
+    double oneMinusFraction = 1.0 - fraction;
+    for (int c = 0; c != numActive; ++c)
+    {
+        double w = activeWeights[c];
+        unsigned long long base = activeBases[c];
+        double front = w * fraction;
+        if (front)
+        {
+            double value = __ldg(quantity + base + right);
+            if (quantityLog && value == negativeInfinity) return zero;
+            y += front * value;
+        }
+        front = w * oneMinusFraction;
+        if (front)
+        {
+            double value = __ldg(quantity + base + right - 1);
+            if (quantityLog && value == negativeInfinity) return zero;
+            y += front * value;
+        }
+    }
+    return y;
+}
+
 extern "C" __global__ void source_spectrum_luminosity_rows_fused(
     const double* axisValues, const int* axisOffsets, const int* axisLengths, const int* axisLog,
     const double* quantity, int numAxes, int quantityLog, int clampFirstAxis, const double* parameters,
@@ -397,9 +496,19 @@ extern "C" __global__ void source_spectrum_luminosity_rows_fused(
     __shared__ double nonWavelengthFraction[4];
     __shared__ unsigned long long cornerBases[16];
     __shared__ double cornerWeights[16];
-    __shared__ double sLog[257];
-    __shared__ double sPdf[257];
+    __shared__ unsigned long long activeBases[16];
+    __shared__ double activeWeights[16];
+    __shared__ int sNumActive;
+    __shared__ double sY0;
+    __shared__ double sP0;
+    __shared__ double sWarpTailLog[2][8];
+    __shared__ double sWarpTailPdf[2][8];
     __shared__ double reduction[8];
+    __shared__ double sExp2Table[64];
+
+    if (lane < 64)
+        sExp2Table[lane] = exp2(static_cast<double>(lane) * (1.0 / 64.0));
+    __syncthreads();
 
     const double* firstAxis = axisValues + axisOffsets[0];
     int firstLength = axisLengths[0];
@@ -408,16 +517,27 @@ extern "C" __global__ void source_spectrum_luminosity_rows_fused(
     int numCorners = 1 << (numAxes - 1);
     int numIntervals = numWavelengths - 1;
 
+    int right0 = 1, valid0 = 1, rightLast = 1, validLast = 1;
+    double fraction0 = 1.0, fractionLast = 1.0;
+    skirt_source_endpoint_axis(firstAxis, firstLength, firstAxisLog, clampFirstAxis, wavelengths[0],
+                               &right0, &fraction0, &valid0);
+    skirt_source_endpoint_axis(firstAxis, firstLength, firstAxisLog, clampFirstAxis,
+                               wavelengths[numIntervals], &rightLast, &fractionLast, &validLast);
+
+    int warpId = lane >> 5;
+    int warpLane = lane & 31;
+
     for (int row = static_cast<int>(blockIdx.x); row < numRows; row += static_cast<int>(gridDim.x))
     {
         int entity = firstEntity + row;
-        if (lane == 0)
+        if (warpId == 0)
         {
-            for (int k = 1; k != numAxes; ++k)
+            if (lane < numAxes - 1)
             {
+                int k = lane + 1;
                 const double* axis = axisValues + axisOffsets[k];
                 int length = axisLengths[k];
-                double value = parameters[static_cast<unsigned long long>(entity) * (numAxes - 1) + (k - 1)];
+                double value = parameters[static_cast<unsigned long long>(entity) * (numAxes - 1) + lane];
                 int right = skirt_lower_bound_double(axis, length, value);
                 if (right == 0)
                 {
@@ -437,84 +557,130 @@ extern "C" __global__ void source_spectrum_luminosity_rows_fused(
                     x1 = log(x1);
                     x2 = log(x2);
                 }
-                nonWavelengthRight[k - 1] = right;
-                nonWavelengthFraction[k - 1] = (value - x1) / (x2 - x1);
+                nonWavelengthRight[lane] = right;
+                nonWavelengthFraction[lane] = (value - x1) / (x2 - x1);
+            }
+            __syncwarp();
+            if (lane < numCorners)
+            {
+                int indices[5] = {0, 0, 0, 0, 0};
+                int term = lane;
+                double weight = 1.0;
+                for (int k = 1; k != numAxes; ++k)
+                {
+                    int left = term & 1;
+                    indices[k] = nonWavelengthRight[k - 1] - left;
+                    double fraction = nonWavelengthFraction[k - 1];
+                    weight *= left ? (1.0 - fraction) : fraction;
+                    term >>= 1;
+                }
+                cornerBases[lane] = skirt_table_flattened_index(indices, axisLengths, numAxes);
+                cornerWeights[lane] = weight;
+            }
+            __syncwarp();
+            if (lane == 0)
+            {
+                int nAct = 0;
+                for (int c = 0; c != numCorners; ++c)
+                {
+                    double w = cornerWeights[c];
+                    if (w != 0.0)
+                    {
+                        activeBases[nAct] = cornerBases[c];
+                        activeWeights[nAct] = w;
+                        ++nAct;
+                    }
+                }
+                sNumActive = nAct;
+                double y0 = skirt_source_endpoint_value(quantity, quantityLog, activeBases, activeWeights,
+                                                        nAct, right0, fraction0, valid0);
+                sY0 = y0;
+                sP0 = quantityLog ? skirt_fast_exp_double(y0, sExp2Table) : y0;
             }
         }
         __syncthreads();
 
-        if (lane < numCorners)
-        {
-            int indices[5] = {0, 0, 0, 0, 0};
-            int term = lane;
-            double weight = 1.0;
-            for (int k = 1; k != numAxes; ++k)
-            {
-                int left = term & 1;
-                indices[k] = nonWavelengthRight[k - 1] - left;
-                double fraction = nonWavelengthFraction[k - 1];
-                weight *= left ? (1.0 - fraction) : fraction;
-                term >>= 1;
-            }
-            cornerBases[lane] = skirt_table_flattened_index(indices, axisLengths, numAxes);
-            cornerWeights[lane] = weight;
-        }
-        __syncthreads();
+        int nAct = sNumActive;
+        unsigned long long cb0 = nAct > 0 ? activeBases[0] : 0ULL;
+        unsigned long long cb1 = nAct > 1 ? activeBases[1] : 0ULL;
+        unsigned long long cb2 = nAct > 2 ? activeBases[2] : 0ULL;
+        unsigned long long cb3 = nAct > 3 ? activeBases[3] : 0ULL;
+        double cw0 = nAct > 0 ? activeWeights[0] : 0.0;
+        double cw1 = nAct > 1 ? activeWeights[1] : 0.0;
+        double cw2 = nAct > 2 ? activeWeights[2] : 0.0;
+        double cw3 = nAct > 3 ? activeWeights[3] : 0.0;
 
         double norm = 0.0;
-        for (int tile = 0; tile < numIntervals; tile += 256)
+        for (int tile = 0, tIdx = 0; tile < numIntervals; tile += 256, ++tIdx)
         {
-            if (tile == 0 && lane == 0)
+            int cur = tIdx & 1;
+            double prevTailLog = 0.0;
+            double prevTailPdf = 0.0;
+            if (warpId == 0 && warpLane == 0)
             {
-                double y0 = skirt_source_spectrum_value(
-                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
-                    cornerBases, cornerWeights, numCorners, wavelengths[0], 0, minRight, numIntervals);
-                sLog[0] = y0;
-                sPdf[0] = quantityLog ? exp(y0) : y0;
+                prevTailLog = (tIdx == 0) ? sY0 : sWarpTailLog[cur ^ 1][7];
+                prevTailPdf = (tIdx == 0) ? sP0 : sWarpTailPdf[cur ^ 1][7];
             }
+
             int pt = tile + 1 + lane;
-            if (pt < numWavelengths)
+            double y = 0.0;
+            double p = 0.0;
+            if (pt < numIntervals)
             {
-                double y = skirt_source_spectrum_value(
-                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
-                    cornerBases, cornerWeights, numCorners, wavelengths[pt], pt, minRight, numIntervals);
-                sLog[lane + 1] = y;
-                sPdf[lane + 1] = quantityLog ? exp(y) : y;
+                int right = pt + minRight - 1;
+                y = cw0 * __ldg(quantity + cb0 + right);
+                if (nAct > 1) y += cw1 * __ldg(quantity + cb1 + right);
+                if (nAct > 2) y += cw2 * __ldg(quantity + cb2 + right);
+                if (nAct > 3) y += cw3 * __ldg(quantity + cb3 + right);
+                for (int c = 4; c < nAct; ++c)
+                    y += activeWeights[c] * __ldg(quantity + activeBases[c] + right);
+                p = quantityLog ? skirt_fast_exp_double(y, sExp2Table) : y;
+            }
+            else if (pt == numIntervals)
+            {
+                y = skirt_source_endpoint_value(quantity, quantityLog, activeBases, activeWeights,
+                                                nAct, rightLast, fractionLast, validLast);
+                p = quantityLog ? skirt_fast_exp_double(y, sExp2Table) : y;
+            }
+
+            double leftLog = __shfl_up_sync(0xffffffffu, y, 1);
+            double leftPdf = __shfl_up_sync(0xffffffffu, p, 1);
+            if (warpLane == 31)
+            {
+                sWarpTailLog[cur][warpId] = y;
+                sWarpTailPdf[cur][warpId] = p;
             }
             __syncthreads();
+
+            if (warpLane == 0)
+            {
+                leftLog = (warpId > 0) ? sWarpTailLog[cur][warpId - 1] : prevTailLog;
+                leftPdf = (warpId > 0) ? sWarpTailPdf[cur][warpId - 1] : prevTailPdf;
+            }
 
             int interval = tile + lane;
             if (interval < numIntervals)
             {
-                double leftPdf = sPdf[lane];
-                double rightPdf = sPdf[lane + 1];
-                double leftX = wavelengths[interval];
-                double rightX = wavelengths[interval + 1];
+                double rightPdf = p;
+                double leftX = __ldg(wavelengths + interval);
+                double rightX = __ldg(wavelengths + interval + 1);
                 if (!loglog)
                     norm += 0.5 * (leftPdf + rightPdf) * (rightX - leftX);
                 else if (leftPdf > 0.0 && rightPdf > 0.0)
                 {
                     if (quantityLog && logRatio)
                         norm += skirt_powerlaw_area_logs(leftPdf, rightPdf, leftX, rightX,
-                                                         logRatio[interval], sLog[lane + 1] - sLog[lane]);
+                                                         __ldg(logRatio + interval), y - leftLog);
                     else
                         norm += skirt_powerlaw_area(leftPdf, rightPdf, leftX, rightX);
                 }
-            }
-            double nextLog0 = sLog[256];
-            double nextPdf0 = sPdf[256];
-            __syncthreads();
-            if (lane == 0)
-            {
-                sLog[0] = nextLog0;
-                sPdf[0] = nextPdf0;
             }
         }
 
         for (int offset = 16; offset > 0; offset >>= 1)
             norm += __shfl_down_sync(0xffffffffu, norm, offset);
-        if ((lane & 31) == 0)
-            reduction[lane >> 5] = norm;
+        if (warpLane == 0)
+            reduction[warpId] = norm;
         __syncthreads();
         if (lane == 0)
         {
@@ -523,7 +689,6 @@ extern "C" __global__ void source_spectrum_luminosity_rows_fused(
             for (int w = 0; w < 8; ++w) total += reduction[w];
             luminosities[entity] = total * scaleValues[entity];
         }
-        __syncthreads();
     }
 }
 
@@ -546,10 +711,20 @@ extern "C" __global__ void source_spectrum_build_rows_fused(
     __shared__ double nonWavelengthFraction[4];
     __shared__ unsigned long long cornerBases[16];
     __shared__ double cornerWeights[16];
-    __shared__ double sLog[257];
-    __shared__ double sPdf[257];
+    __shared__ unsigned long long activeBases[16];
+    __shared__ double activeWeights[16];
+    __shared__ int sNumActive;
+    __shared__ double sY0;
+    __shared__ double sP0;
+    __shared__ double sWarpTailLog[2][8];
+    __shared__ double sWarpTailPdf[2][8];
     __shared__ double warpSum[8];
     __shared__ double carry;
+    __shared__ double sExp2Table[64];
+
+    if (lane < 64)
+        sExp2Table[lane] = exp2(static_cast<double>(lane) * (1.0 / 64.0));
+    __syncthreads();
 
     const double* firstAxis = axisValues + axisOffsets[0];
     int firstLength = axisLengths[0];
@@ -559,6 +734,16 @@ extern "C" __global__ void source_spectrum_build_rows_fused(
     int numIntervals = numWavelengths - 1;
     unsigned long long scratchOffset = static_cast<unsigned long long>(blockIdx.x) * numWavelengths;
 
+    int right0 = 1, valid0 = 1, rightLast = 1, validLast = 1;
+    double fraction0 = 1.0, fractionLast = 1.0;
+    skirt_source_endpoint_axis(firstAxis, firstLength, firstAxisLog, clampFirstAxis, wavelengths[0],
+                               &right0, &fraction0, &valid0);
+    skirt_source_endpoint_axis(firstAxis, firstLength, firstAxisLog, clampFirstAxis,
+                               wavelengths[numIntervals], &rightLast, &fractionLast, &validLast);
+
+    int warpId = lane >> 5;
+    int warpLane = lane & 31;
+
     for (int row = static_cast<int>(blockIdx.x); row < numRows; row += static_cast<int>(gridDim.x))
     {
         int entityIndex = firstEntity + row;
@@ -566,24 +751,17 @@ extern "C" __global__ void source_spectrum_build_rows_fused(
         unsigned long long outputOffset = entity * static_cast<unsigned int>(numWavelengths);
         if (historyBeginv && historyBeginv[entityIndex] == historyBeginv[entityIndex + 1])
         {
-            for (int i = lane; i < numWavelengths; i += 256)
-            {
-                if (pdfBfloat16Output)
-                    pdfBfloat16Output[outputOffset + i] = 0;
-                else
-                    pdfOutput[outputOffset + i] = 0.0f;
-                cdfOutput[outputOffset + i] = 0.0f;
-            }
             continue;
         }
 
-        if (lane == 0)
+        if (warpId == 0)
         {
-            for (int k = 1; k != numAxes; ++k)
+            if (lane < numAxes - 1)
             {
+                int k = lane + 1;
                 const double* axis = axisValues + axisOffsets[k];
                 int length = axisLengths[k];
-                double value = parameters[static_cast<unsigned long long>(entityIndex) * (numAxes - 1) + (k - 1)];
+                double value = parameters[static_cast<unsigned long long>(entityIndex) * (numAxes - 1) + lane];
                 int right = skirt_lower_bound_double(axis, length, value);
                 if (right == 0)
                 {
@@ -603,86 +781,142 @@ extern "C" __global__ void source_spectrum_build_rows_fused(
                     x1 = log(x1);
                     x2 = log(x2);
                 }
-                nonWavelengthRight[k - 1] = right;
-                nonWavelengthFraction[k - 1] = (value - x1) / (x2 - x1);
+                nonWavelengthRight[lane] = right;
+                nonWavelengthFraction[lane] = (value - x1) / (x2 - x1);
             }
-            carry = 0.0;
-            cdfScratch[scratchOffset] = 0.0;
-        }
-        __syncthreads();
-
-        if (lane < numCorners)
-        {
-            int indices[5] = {0, 0, 0, 0, 0};
-            int term = lane;
-            double weight = 1.0;
-            for (int k = 1; k != numAxes; ++k)
+            __syncwarp();
+            if (lane < numCorners)
             {
-                int left = term & 1;
-                indices[k] = nonWavelengthRight[k - 1] - left;
-                double fraction = nonWavelengthFraction[k - 1];
-                weight *= left ? (1.0 - fraction) : fraction;
-                term >>= 1;
+                int indices[5] = {0, 0, 0, 0, 0};
+                int term = lane;
+                double weight = 1.0;
+                for (int k = 1; k != numAxes; ++k)
+                {
+                    int left = term & 1;
+                    indices[k] = nonWavelengthRight[k - 1] - left;
+                    double fraction = nonWavelengthFraction[k - 1];
+                    weight *= left ? (1.0 - fraction) : fraction;
+                    term >>= 1;
+                }
+                cornerBases[lane] = skirt_table_flattened_index(indices, axisLengths, numAxes);
+                cornerWeights[lane] = weight;
             }
-            cornerBases[lane] = skirt_table_flattened_index(indices, axisLengths, numAxes);
-            cornerWeights[lane] = weight;
+            __syncwarp();
+            if (lane == 0)
+            {
+                int nAct = 0;
+                for (int c = 0; c != numCorners; ++c)
+                {
+                    double w = cornerWeights[c];
+                    if (w != 0.0)
+                    {
+                        activeBases[nAct] = cornerBases[c];
+                        activeWeights[nAct] = w;
+                        ++nAct;
+                    }
+                }
+                sNumActive = nAct;
+                double y0 = skirt_source_endpoint_value(quantity, quantityLog, activeBases, activeWeights,
+                                                        nAct, right0, fraction0, valid0);
+                double p0 = quantityLog ? skirt_fast_exp_double(y0, sExp2Table) : y0;
+                sY0 = y0;
+                sP0 = p0;
+                carry = 0.0;
+                if (numWavelengths > 4096)
+                {
+                    pdfScratch[scratchOffset] = p0;
+                    cdfScratch[scratchOffset] = 0.0;
+                }
+            }
         }
         __syncthreads();
 
-        for (int tile = 0; tile < numIntervals; tile += 256)
+        int nAct = sNumActive;
+        unsigned long long cb0 = nAct > 0 ? activeBases[0] : 0ULL;
+        unsigned long long cb1 = nAct > 1 ? activeBases[1] : 0ULL;
+        unsigned long long cb2 = nAct > 2 ? activeBases[2] : 0ULL;
+        unsigned long long cb3 = nAct > 3 ? activeBases[3] : 0ULL;
+        double cw0 = nAct > 0 ? activeWeights[0] : 0.0;
+        double cw1 = nAct > 1 ? activeWeights[1] : 0.0;
+        double cw2 = nAct > 2 ? activeWeights[2] : 0.0;
+        double cw3 = nAct > 3 ? activeWeights[3] : 0.0;
+
+        double regPdf[16];
+        double regCdf[16];
+        bool useRegScratch = (numWavelengths <= 4096);
+
+        for (int tile = 0, tIdx = 0; tile < numIntervals; tile += 256, ++tIdx)
         {
             int tileCount = numIntervals - tile;
             if (tileCount > 256) tileCount = 256;
-
-            if (tile == 0 && lane == 0)
+            int cur = tIdx & 1;
+            double prevTailLog = 0.0;
+            double prevTailPdf = 0.0;
+            if (warpId == 0 && warpLane == 0)
             {
-                double y0 = skirt_source_spectrum_value(
-                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
-                    cornerBases, cornerWeights, numCorners, wavelengths[0], 0, minRight, numIntervals);
-                double p0 = quantityLog ? exp(y0) : y0;
-                sLog[0] = y0;
-                sPdf[0] = p0;
-                pdfScratch[scratchOffset] = p0;
+                prevTailLog = (tIdx == 0) ? sY0 : sWarpTailLog[cur ^ 1][7];
+                prevTailPdf = (tIdx == 0) ? sP0 : sWarpTailPdf[cur ^ 1][7];
             }
+
             int pt = tile + 1 + lane;
-            if (pt < numWavelengths)
+            double y = 0.0;
+            double p = 0.0;
+            if (pt < numIntervals)
             {
-                double y = skirt_source_spectrum_value(
-                    firstAxis, firstLength, firstAxisLog, quantity, quantityLog, clampFirstAxis,
-                    cornerBases, cornerWeights, numCorners, wavelengths[pt], pt, minRight, numIntervals);
-                double p = quantityLog ? exp(y) : y;
-                sLog[lane + 1] = y;
-                sPdf[lane + 1] = p;
-                pdfScratch[scratchOffset + pt] = p;
+                int right = pt + minRight - 1;
+                y = cw0 * __ldg(quantity + cb0 + right);
+                if (nAct > 1) y += cw1 * __ldg(quantity + cb1 + right);
+                if (nAct > 2) y += cw2 * __ldg(quantity + cb2 + right);
+                if (nAct > 3) y += cw3 * __ldg(quantity + cb3 + right);
+                for (int c = 4; c < nAct; ++c)
+                    y += activeWeights[c] * __ldg(quantity + activeBases[c] + right);
+                p = quantityLog ? skirt_fast_exp_double(y, sExp2Table) : y;
+                if (!useRegScratch) pdfScratch[scratchOffset + pt] = p;
+            }
+            else if (pt == numIntervals)
+            {
+                y = skirt_source_endpoint_value(quantity, quantityLog, activeBases, activeWeights,
+                                                nAct, rightLast, fractionLast, validLast);
+                p = quantityLog ? skirt_fast_exp_double(y, sExp2Table) : y;
+                if (!useRegScratch) pdfScratch[scratchOffset + pt] = p;
+            }
+
+            double leftLog = __shfl_up_sync(0xffffffffu, y, 1);
+            double leftPdf = __shfl_up_sync(0xffffffffu, p, 1);
+            if (warpLane == 31)
+            {
+                sWarpTailLog[cur][warpId] = y;
+                sWarpTailPdf[cur][warpId] = p;
             }
             __syncthreads();
+
+            if (warpLane == 0)
+            {
+                leftLog = (warpId > 0) ? sWarpTailLog[cur][warpId - 1] : prevTailLog;
+                leftPdf = (warpId > 0) ? sWarpTailPdf[cur][warpId - 1] : prevTailPdf;
+            }
 
             int interval = tile + lane;
             double area = 0.0;
             if (interval < numIntervals)
             {
-                double leftPdf = sPdf[lane];
-                double rightPdf = sPdf[lane + 1];
-                double leftX = wavelengths[interval];
-                double rightX = wavelengths[interval + 1];
+                double rightPdf = p;
+                double leftX = __ldg(wavelengths + interval);
+                double rightX = __ldg(wavelengths + interval + 1);
                 if (!loglog)
                     area = 0.5 * (leftPdf + rightPdf) * (rightX - leftX);
                 else if (leftPdf > 0.0 && rightPdf > 0.0)
                 {
                     if (quantityLog && logRatio)
                         area = skirt_powerlaw_area_logs(leftPdf, rightPdf, leftX, rightX,
-                                                        logRatio[interval], sLog[lane + 1] - sLog[lane]);
+                                                        __ldg(logRatio + interval), y - leftLog);
                     else
                         area = skirt_powerlaw_area(leftPdf, rightPdf, leftX, rightX);
                 }
                 if (!isfinite(area) && status) atomicExch(status, 0);
             }
-            double nextLog0 = sLog[256];
-            double nextPdf0 = sPdf[256];
             double tileCarry = carry;
             double prefix = area;
-            int warpLane = lane & 31;
-            int warpId = lane >> 5;
             #pragma unroll
             for (int offset = 1; offset < 32; offset <<= 1)
             {
@@ -698,11 +932,14 @@ extern "C" __global__ void source_spectrum_build_rows_fused(
                 if (w < warpId) tileCarry += warpSum[w];
             }
             double cdfVal = tileCarry + prefix;
-            if (interval < numIntervals) cdfScratch[scratchOffset + interval + 1] = cdfVal;
-            if (lane == 0)
+            if (useRegScratch)
             {
-                sLog[0] = nextLog0;
-                sPdf[0] = nextPdf0;
+                regPdf[tIdx] = p;
+                regCdf[tIdx] = cdfVal;
+            }
+            else if (interval < numIntervals)
+            {
+                cdfScratch[scratchOffset + interval + 1] = cdfVal;
             }
             if (lane == tileCount - 1) carry = cdfVal;
             __syncthreads();
@@ -712,24 +949,67 @@ extern "C" __global__ void source_spectrum_build_rows_fused(
         if (!isfinite(norm) && status) atomicExch(status, 0);
         bool normalize = norm > 0.0;
         double invNorm = normalize ? (1.0 / norm) : 1.0;
-        for (int i = lane; i < numWavelengths; i += 256)
+        if (useRegScratch)
         {
-            double pdf = pdfScratch[scratchOffset + i] * invNorm;
-            double cdf = cdfScratch[scratchOffset + i] * invNorm;
-            if ((!isfinite(pdf) || !isfinite(cdf)) && status) atomicExch(status, 0);
-
-            float pdfFloat = static_cast<float>(pdf);
-            float cdfFloat = static_cast<float>(cdf);
-            if ((!isfinite(pdfFloat) || !isfinite(cdfFloat)) && status) atomicExch(status, 0);
-            if (pdfBfloat16Output)
+            if (lane == 0)
             {
-                unsigned short packed = skirt_source_bfloat16_rne(pdfFloat);
-                if ((packed & 0x7f80U) == 0x7f80U && status) atomicExch(status, 0);
-                pdfBfloat16Output[outputOffset + i] = packed;
+                double pdf0 = sP0 * invNorm;
+                float pdf0Float = static_cast<float>(pdf0);
+                if ((!isfinite(pdf0) || !isfinite(pdf0Float)) && status) atomicExch(status, 0);
+                if (pdfBfloat16Output)
+                {
+                    unsigned short packed = skirt_source_bfloat16_rne(pdf0Float);
+                    if ((packed & 0x7f80U) == 0x7f80U && status) atomicExch(status, 0);
+                    pdfBfloat16Output[outputOffset] = packed;
+                }
+                else
+                    pdfOutput[outputOffset] = pdf0Float;
+                cdfOutput[outputOffset] = 0.0f;
             }
-            else
-                pdfOutput[outputOffset + i] = pdfFloat;
-            cdfOutput[outputOffset + i] = cdfFloat;
+            for (int tile = 0, tIdx = 0; tile < numIntervals; tile += 256, ++tIdx)
+            {
+                int i = tile + 1 + lane;
+                if (i < numWavelengths)
+                {
+                    double pdf = regPdf[tIdx] * invNorm;
+                    double cdf = regCdf[tIdx] * invNorm;
+                    if ((!isfinite(pdf) || !isfinite(cdf)) && status) atomicExch(status, 0);
+                    float pdfFloat = static_cast<float>(pdf);
+                    float cdfFloat = static_cast<float>(cdf);
+                    if ((!isfinite(pdfFloat) || !isfinite(cdfFloat)) && status) atomicExch(status, 0);
+                    if (pdfBfloat16Output)
+                    {
+                        unsigned short packed = skirt_source_bfloat16_rne(pdfFloat);
+                        if ((packed & 0x7f80U) == 0x7f80U && status) atomicExch(status, 0);
+                        pdfBfloat16Output[outputOffset + i] = packed;
+                    }
+                    else
+                        pdfOutput[outputOffset + i] = pdfFloat;
+                    cdfOutput[outputOffset + i] = cdfFloat;
+                }
+            }
+        }
+        else
+        {
+            for (int i = lane; i < numWavelengths; i += 256)
+            {
+                double pdf = pdfScratch[scratchOffset + i] * invNorm;
+                double cdf = cdfScratch[scratchOffset + i] * invNorm;
+                if ((!isfinite(pdf) || !isfinite(cdf)) && status) atomicExch(status, 0);
+
+                float pdfFloat = static_cast<float>(pdf);
+                float cdfFloat = static_cast<float>(cdf);
+                if ((!isfinite(pdfFloat) || !isfinite(cdfFloat)) && status) atomicExch(status, 0);
+                if (pdfBfloat16Output)
+                {
+                    unsigned short packed = skirt_source_bfloat16_rne(pdfFloat);
+                    if ((packed & 0x7f80U) == 0x7f80U && status) atomicExch(status, 0);
+                    pdfBfloat16Output[outputOffset + i] = packed;
+                }
+                else
+                    pdfOutput[outputOffset + i] = pdfFloat;
+                cdfOutput[outputOffset + i] = cdfFloat;
+            }
         }
         __syncthreads();
     }
